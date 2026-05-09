@@ -1,0 +1,86 @@
+<?php
+
+namespace Database\Seeders;
+
+use App\Models\Permission;
+use Illuminate\Database\Seeder;
+
+class RolePermissionSeeder extends Seeder
+{
+    public function run(): void
+    {
+        // Định nghĩa tất cả permissions theo module
+        $definitions = [
+            'dashboard' => [['dashboard.view', 'Xem dashboard']],
+            'products' => [
+                ['products.view', 'Xem sản phẩm'],
+                ['products.create', 'Thêm sản phẩm'],
+                ['products.edit', 'Sửa sản phẩm'],
+                ['products.delete', 'Xóa sản phẩm'],
+            ],
+            'warehouses' => [
+                ['warehouses.view', 'Xem kho hàng'],
+                ['warehouses.create', 'Thêm kho'],
+                ['warehouses.edit', 'Sửa kho'],
+                ['warehouses.delete', 'Xóa kho'],
+            ],
+            'inventory' => [['inventory.view', 'Xem tồn kho']],
+            'companies' => [
+                ['companies.view', 'Xem đối tác'],
+                ['companies.create', 'Thêm đối tác'],
+                ['companies.edit', 'Sửa đối tác'],
+                ['companies.delete', 'Xóa đối tác'],
+            ],
+            'purchases' => [
+                ['purchases.view', 'Xem đơn nhập'],
+                ['purchases.create', 'Tạo đơn nhập'],
+                ['purchases.edit', 'Sửa đơn nhập'],
+                ['purchases.confirm', 'Xác nhận đơn nhập'],
+                ['purchases.cancel', 'Hủy đơn nhập'],
+            ],
+            'sales' => [
+                ['sales.view', 'Xem đơn bán'],
+                ['sales.create', 'Tạo đơn bán'],
+                ['sales.edit', 'Sửa đơn bán'],
+                ['sales.confirm', 'Xác nhận đơn bán'],
+                ['sales.cancel', 'Hủy đơn bán'],
+            ],
+            'payments' => [
+                ['payments.view', 'Xem thu chi'],
+                ['payments.create', 'Tạo phiếu thu chi'],
+            ],
+            'accounts' => [
+                ['accounts.view', 'Xem tài khoản kế toán'],
+                ['accounts.create', 'Thêm tài khoản'],
+                ['accounts.edit', 'Sửa tài khoản'],
+            ],
+            'journal' => [['journal.view', 'Xem nhật ký']],
+            'reports' => [['reports.view', 'Xem báo cáo']],
+            'employees' => [
+                ['employees.view', 'Xem nhân viên'],
+                ['employees.create', 'Thêm nhân viên'],
+                ['employees.edit', 'Sửa nhân viên'],
+                ['employees.delete', 'Xóa nhân viên'],
+            ],
+            'roles' => [
+                ['roles.view', 'Xem vai trò'],
+                ['roles.create', 'Thêm vai trò'],
+                ['roles.edit', 'Sửa vai trò'],
+                ['roles.delete', 'Xóa vai trò'],
+            ],
+            'settings' => [
+                ['settings.view', 'Xem cài đặt'],
+                ['settings.edit', 'Sửa cài đặt'],
+            ],
+        ];
+
+        foreach ($definitions as $module => $items) {
+            foreach ($items as [$name, $displayName]) {
+                Permission::updateOrCreate(
+                    ['name' => $name],
+                    ['display_name' => $displayName, 'module' => $module]
+                );
+            }
+        }
+    }
+}

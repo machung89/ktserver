@@ -1,0 +1,71 @@
+<?php
+
+namespace App\Models;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Models\Concerns\HasPaymentStatus;
+use App\Models\Scopes\OwnedByOrganization;
+use Database\Factories\PurchaseOrderFactory;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+
+#[Fillable(['order_number', 'company_id', 'warehouse_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'notes', 'organization_id', 'payment_status', 'paid_amount'])]
+class PurchaseOrder extends Model
+{
+    /** @use HasFactory<PurchaseOrderFactory> */
+    use HasFactory, HasPaymentStatus;
+
+    protected static function booted(): void
+    {
+        static::addGlobalScope(new OwnedByOrganization);
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'status' => OrderStatus::class,
+            'payment_status' => PaymentStatus::class,
+            'order_date' => 'date',
+            'expected_date' => 'date',
+            'subtotal' => 'decimal:2',
+            'tax_amount' => 'decimal:2',
+            'total_amount' => 'decimal:2',
+            'paid_amount' => 'decimal:2',
+        ];
+    }
+
+    public function company(): BelongsTo
+    {
+        return $this->belongsTo(Company::class);
+    }
+
+    public function warehouse(): BelongsTo
+    {
+        return $this->belongsTo(Warehouse::class);
+    }
+
+    public function items(): HasMany
+    {
+        return $this->hasMany(PurchaseOrderItem::class);
+    }
+
+    public function journalEntries(): MorphMany
+    {
+        return $this->morphMany(JournalEntry::class, 'reference');
+    }
+
+    public function inventoryTransactions(): MorphMany
+    {
+        return $this->morphMany(InventoryTransaction::class, 'reference');
+    }
+
+    public function payments(): MorphMany
+    {
+        return $this->morphMany(Payment::class, 'reference');
+    }
+}

@@ -39,6 +39,7 @@ class OrganizationController extends Controller
             'settings.require_cost_price' => ['boolean'],
             'settings.enable_sales_tax' => ['boolean'],
             'settings.default_tax_rate' => ['numeric', 'min:0', 'max:100'],
+            'settings.enable_discount' => ['boolean'],
         ]);
 
         $org->update($validated);
@@ -66,6 +67,7 @@ class OrganizationController extends Controller
                 'require_cost_price' => (bool) $org->setting('require_cost_price', false),
                 'enable_sales_tax' => (bool) $org->setting('enable_sales_tax', false),
                 'default_tax_rate' => (float) $org->setting('default_tax_rate', 0),
+                'enable_discount' => (bool) $org->setting('enable_discount', false),
             ],
         ];
     }

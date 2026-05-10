@@ -64,7 +64,6 @@ class SalesOrderController extends Controller
         $validated = $request->validate([
             'company_id' => ['required', 'exists:companies,id'],
             'order_date' => ['required', 'date'],
-            'expected_date' => ['nullable', 'date', 'after_or_equal:order_date'],
             'notes' => ['nullable', 'string'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
@@ -72,6 +71,8 @@ class SalesOrderController extends Controller
             'items.*.quantity' => ['required', 'numeric', 'min:0.001'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.cost_price' => ['nullable', 'numeric', 'min:0'],
+            'items.*.discount_type' => ['nullable', 'in:percent,fixed'],
+            'items.*.discount_value' => ['nullable', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
 
@@ -122,7 +123,6 @@ class SalesOrderController extends Controller
                 'organization_id' => $orgId,
                 'company_id' => $validated['company_id'],
                 'order_date' => $validated['order_date'],
-                'expected_date' => $validated['expected_date'] ?? null,
                 'notes' => $validated['notes'] ?? null,
                 'subtotal' => 0,
                 'tax_amount' => 0,
@@ -134,8 +134,16 @@ class SalesOrderController extends Controller
             $taxAmount = 0;
 
             foreach ($validated['items'] as $item) {
-                $amount = $item['quantity'] * $item['unit_price'];
-                $taxRate = $item['tax_rate'] ?? 0;
+                $base = (float) $item['quantity'] * (float) $item['unit_price'];
+                $discountType = $item['discount_type'] ?? null;
+                $discountValue = (float) ($item['discount_value'] ?? 0);
+                $discountAmount = match ($discountType) {
+                    'percent' => $base * $discountValue / 100,
+                    'fixed' => min($discountValue, $base),
+                    default => 0,
+                };
+                $amount = $base - $discountAmount;
+                $taxRate = (float) ($item['tax_rate'] ?? 0);
                 $subtotal += $amount;
                 $taxAmount += $amount * $taxRate / 100;
 
@@ -144,6 +152,8 @@ class SalesOrderController extends Controller
                     'warehouse_id' => $item['warehouse_id'],
                     'quantity' => $item['quantity'],
                     'unit_price' => $item['unit_price'],
+                    'discount_type' => $discountType,
+                    'discount_value' => $discountValue,
                     'cost_price' => $item['cost_price'] ?? 0,
                     'tax_rate' => $taxRate,
                     'amount' => $amount,
@@ -157,7 +167,11 @@ class SalesOrderController extends Controller
                 $inventory->increment('reserved_quantity', (float) $item['quantity']);
             }
 
-            $order->update(['subtotal' => $subtotal, 'tax_amount' => $taxAmount, 'total_amount' => $subtotal + $taxAmount]);
+            $order->update([
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'total_amount' => $subtotal + $taxAmount,
+            ]);
 
             return $order;
         });
@@ -180,7 +194,6 @@ class SalesOrderController extends Controller
         $validated = $request->validate([
             'company_id' => ['sometimes', 'exists:companies,id'],
             'order_date' => ['sometimes', 'date'],
-            'expected_date' => ['nullable', 'date'],
             'notes' => ['nullable', 'string'],
         ]);
 

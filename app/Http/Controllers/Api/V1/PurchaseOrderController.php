@@ -36,7 +36,6 @@ class PurchaseOrderController extends Controller
             'company_id' => ['required', 'exists:companies,id'],
             'warehouse_id' => ['required', 'exists:warehouses,id'],
             'order_date' => ['required', 'date'],
-            'expected_date' => ['nullable', 'date', 'after_or_equal:order_date'],
             'notes' => ['nullable', 'string'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
@@ -52,7 +51,6 @@ class PurchaseOrderController extends Controller
             'company_id' => $validated['company_id'],
             'warehouse_id' => $validated['warehouse_id'],
             'order_date' => $validated['order_date'],
-            'expected_date' => $validated['expected_date'] ?? null,
             'notes' => $validated['notes'] ?? null,
             'subtotal' => 0,
             'tax_amount' => 0,
@@ -98,7 +96,6 @@ class PurchaseOrderController extends Controller
             'company_id' => ['sometimes', 'exists:companies,id'],
             'warehouse_id' => ['sometimes', 'exists:warehouses,id'],
             'order_date' => ['sometimes', 'date'],
-            'expected_date' => ['nullable', 'date'],
             'notes' => ['nullable', 'string'],
         ]);
 

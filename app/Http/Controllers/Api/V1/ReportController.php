@@ -204,6 +204,53 @@ class ReportController extends Controller
         ]);
     }
 
+    public function soldProducts(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+
+        $rows = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->join('products as p', 'p.id', '=', 'soi.product_id')
+            ->leftJoin('product_categories as cat', 'cat.id', '=', 'p.category_id')
+            ->leftJoin('product_categories as parent_cat', 'parent_cat.id', '=', 'cat.parent_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('soi.is_return', false)
+            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->when($request->company_id, fn ($q, $v) => $q->where('so.company_id', $v))
+            ->when($request->category_id, fn ($q, $v) => $q->where('p.category_id', $v))
+            ->groupBy('p.id', 'p.code', 'p.name', 'p.unit', 'cat.name', 'parent_cat.name')
+            ->select([
+                'p.id as product_id',
+                'p.code as product_code',
+                'p.name as product_name',
+                'p.unit',
+                DB::raw('CASE WHEN parent_cat.name IS NOT NULL THEN CONCAT(parent_cat.name, \' › \', cat.name) ELSE cat.name END as category_name'),
+                DB::raw('SUM(soi.quantity) as quantity'),
+                DB::raw('COUNT(DISTINCT so.id) as order_count'),
+                DB::raw('SUM(soi.amount) as amount'),
+            ])
+            ->orderByDesc(DB::raw('SUM(soi.quantity)'))
+            ->get()
+            ->map(fn ($r) => [
+                'product_id' => $r->product_id,
+                'product_code' => $r->product_code,
+                'product_name' => $r->product_name,
+                'unit' => $r->unit,
+                'category_name' => $r->category_name,
+                'quantity' => round((float) $r->quantity, 3),
+                'order_count' => (int) $r->order_count,
+                'amount' => round((float) $r->amount, 2),
+            ]);
+
+        return response()->json([
+            'data' => $rows,
+            'total_quantity' => round($rows->sum('quantity'), 3),
+            'total_amount' => round($rows->sum('amount'), 2),
+        ]);
+    }
+
     public function balanceSheet(Request $request): JsonResponse
     {
         $orgId = $this->orgId();

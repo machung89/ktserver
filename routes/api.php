@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\ProfileController;
 use App\Http\Controllers\Api\V1\AccountController;
 use App\Http\Controllers\Api\V1\CompanyController;
 use App\Http\Controllers\Api\V1\EmployeeController;
@@ -24,6 +25,8 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::middleware('auth:sanctum')->group(function (): void {
     Route::get('/user', fn (Request $request) => $request->user());
     Route::post('/logout', [AuthController::class, 'logout']);
+    Route::put('/profile', [ProfileController::class, 'update']);
+    Route::put('/profile/password', [ProfileController::class, 'changePassword']);
 
     Route::prefix('v1')->middleware('org')->group(function (): void {
 
@@ -49,6 +52,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
                 'org_settings' => [
                     'enable_sales_tax' => (bool) $org?->setting('enable_sales_tax', false),
                     'default_tax_rate' => (float) $org?->setting('default_tax_rate', 0),
+                    'enable_discount' => (bool) $org?->setting('enable_discount', false),
                 ],
             ]);
         });
@@ -150,6 +154,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('reports/receivables', [ReportController::class, 'receivables']);
             Route::get('reports/payables', [ReportController::class, 'payables']);
             Route::get('reports/sales', [ReportController::class, 'sales']);
+            Route::get('reports/sold-products', [ReportController::class, 'soldProducts']);
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance']);
             Route::get('reports/balance-sheet', [ReportController::class, 'balanceSheet']);
             Route::get('reports/income-statement', [ReportController::class, 'incomeStatement']);

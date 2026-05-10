@@ -15,6 +15,8 @@ class SalesOrderItemResource extends JsonResource
             'warehouse_id' => $this->warehouse_id,
             'quantity' => $this->quantity,
             'unit_price' => $this->unit_price,
+            'discount_type' => $this->discount_type,
+            'discount_value' => $this->discount_value,
             'cost_price' => $this->cost_price,
             'tax_rate' => $this->tax_rate,
             'amount' => $this->amount,

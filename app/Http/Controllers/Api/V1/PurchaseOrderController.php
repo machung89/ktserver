@@ -7,10 +7,12 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PurchaseOrderResource;
 use App\Models\PurchaseOrder;
+use App\Models\User;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 
 class PurchaseOrderController extends Controller
@@ -21,7 +23,12 @@ class PurchaseOrderController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $orders = PurchaseOrder::with(['company', 'warehouse'])
+        /** @var User $user */
+        $user = Auth::user();
+        $canViewAll = $user->hasPermission('purchases.view_all');
+
+        $orders = PurchaseOrder::with(['company', 'warehouse', 'createdBy'])
+            ->when(! $canViewAll, fn ($q) => $q->where('created_by', $user->id))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->latest()
@@ -55,6 +62,7 @@ class PurchaseOrderController extends Controller
             'subtotal' => 0,
             'tax_amount' => 0,
             'total_amount' => 0,
+            'created_by' => Auth::id(),
         ]);
 
         $subtotal = 0;
@@ -83,6 +91,12 @@ class PurchaseOrderController extends Controller
 
     public function show(PurchaseOrder $purchaseOrder): PurchaseOrderResource
     {
+        /** @var User $user */
+        $user = Auth::user();
+        if (! $user->hasPermission('purchases.view_all') && $purchaseOrder->created_by !== $user->id) {
+            abort(403, 'Bạn không có quyền xem đơn nhập này.');
+        }
+
         return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product']));
     }
 

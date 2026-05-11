@@ -31,20 +31,34 @@ class PaymentController extends Controller
         return PaymentResource::collection($payments);
     }
 
+    public function advanceBalance(Request $request): JsonResponse
+    {
+        $request->validate(['company_id' => ['required', 'exists:companies,id']]);
+
+        $balance = $this->paymentService->availableAdvance(
+            (int) $request->company_id,
+            $this->orgId()
+        );
+
+        return response()->json(['balance' => $balance]);
+    }
+
     public function store(Request $request): JsonResponse
     {
         $hasExpenseAccount = $request->filled('expense_account_id');
+        $isApplyingAdvance = $request->boolean('is_advance') && $request->filled('reference_id');
 
         $validated = $request->validate([
             'type' => ['required', Rule::enum(PaymentType::class)],
             'company_id' => [$hasExpenseAccount ? 'nullable' : 'required', 'exists:companies,id'],
-            'account_id' => ['required', 'exists:accounts,id'],
+            'account_id' => [$isApplyingAdvance ? 'nullable' : 'required', 'nullable', 'exists:accounts,id'],
             'expense_account_id' => ['nullable', 'exists:accounts,id'],
             'payment_date' => ['required', 'date'],
             'amount' => ['required', 'numeric', 'min:0.01'],
             'description' => ['nullable', 'string'],
             'reference_type' => ['nullable', 'string'],
             'reference_id' => ['nullable', 'integer'],
+            'is_advance' => ['boolean'],
         ]);
 
         // Kiểm tra số tiền thanh toán không vượt quá số tiền còn nợ
@@ -61,6 +75,23 @@ class PaymentController extends Controller
                         )],
                     ]);
                 }
+            }
+        }
+
+        // Kiểm tra tiền thu trước còn đủ khi áp vào đơn hàng
+        if ($isApplyingAdvance && ! empty($validated['company_id'])) {
+            $available = $this->paymentService->availableAdvance(
+                (int) $validated['company_id'],
+                $this->orgId()
+            );
+            if ((float) $validated['amount'] > $available + 0.01) {
+                throw ValidationException::withMessages([
+                    'amount' => [sprintf(
+                        'Số tiền áp dụng (%s₫) vượt quá tiền thu trước còn lại (%s₫).',
+                        number_format($validated['amount'], 0, ',', '.'),
+                        number_format($available, 0, ',', '.')
+                    )],
+                ]);
             }
         }
 

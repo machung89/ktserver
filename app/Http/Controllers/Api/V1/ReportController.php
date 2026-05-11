@@ -398,11 +398,23 @@ class ReportController extends Controller
             ->orderBy('id')
             ->get();
 
+        // Single query to get the counterpart account for each payment
+        $counterpartMap = DB::table('journal_entries as je')
+            ->join('journal_entry_lines as jel', 'jel.journal_entry_id', '=', 'je.id')
+            ->join('accounts as a', 'a.id', '=', 'jel.account_id')
+            ->where('je.reference_type', Payment::class)
+            ->whereIn('je.reference_id', $entries->pluck('id'))
+            ->where('a.code', 'not like', '111%')
+            ->where('a.code', 'not like', '112%')
+            ->select('je.reference_id as payment_id', 'a.code', 'a.name')
+            ->get()
+            ->keyBy('payment_id');
+
         $balance = $openingBalance;
         $totalThu = 0.0;
         $totalChi = 0.0;
 
-        $rows = $entries->map(function (Payment $p) use (&$balance, &$totalThu, &$totalChi) {
+        $rows = $entries->map(function (Payment $p) use (&$balance, &$totalThu, &$totalChi, $counterpartMap) {
             $amount = (float) $p->amount;
             $isReceipt = $p->type === PaymentType::Receipt;
             $thu = $isReceipt ? $amount : 0.0;
@@ -410,6 +422,8 @@ class ReportController extends Controller
             $totalThu += $thu;
             $totalChi += $chi;
             $balance += $thu - $chi;
+
+            $cp = $counterpartMap->get($p->id);
 
             return [
                 'id' => $p->id,
@@ -419,6 +433,8 @@ class ReportController extends Controller
                 'company' => $p->company?->name,
                 'account_code' => $p->account?->code,
                 'account_name' => $p->account?->name,
+                'counterpart_code' => $cp?->code,
+                'counterpart_name' => $cp?->name,
                 'thu' => $thu,
                 'chi' => $chi,
                 'balance' => round($balance, 2),

@@ -9,6 +9,7 @@ use App\Models\Product;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 
 class ProductController extends Controller
@@ -17,7 +18,7 @@ class ProductController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $products = Product::with('category.parent')
+        $products = Product::with(['category.parent', 'units'])
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('code', 'like', "%{$v}%"))
             ->when($request->category_id, fn ($q, $v) => $q->where('category_id', $v))
             ->when($request->boolean('active_only', false), fn ($q) => $q->where('is_active', true))
@@ -29,7 +30,7 @@ class ProductController extends Controller
     public function lookupBarcode(Request $request): ProductResource|JsonResponse
     {
         $barcode = $request->query('barcode', '');
-        $product = Product::with('category.parent')
+        $product = Product::with(['category.parent', 'units'])
             ->where('barcode', $barcode)
             ->first();
 
@@ -52,16 +53,24 @@ class ProductController extends Controller
             'price' => ['required', 'numeric', 'min:0'],
             'cost_price' => ['required', 'numeric', 'min:0'],
             'is_active' => ['boolean'],
+            'units' => ['nullable', 'array'],
+            'units.*.name' => ['required', 'string'],
+            'units.*.conversion_factor' => ['required', 'numeric', 'min:0.0001'],
         ]);
 
-        $product = Product::create(array_merge($validated, ['organization_id' => $this->orgId()]));
+        $product = Product::create(array_merge(
+            collect($validated)->except('units')->all(),
+            ['organization_id' => $this->orgId()]
+        ));
 
-        return (new ProductResource($product))->response()->setStatusCode(201);
+        $this->syncUnits($product, $validated['units'] ?? []);
+
+        return (new ProductResource($product->load('units')))->response()->setStatusCode(201);
     }
 
     public function show(Product $product): ProductResource
     {
-        return new ProductResource($product->load('category.parent'));
+        return new ProductResource($product->load(['category.parent', 'units']));
     }
 
     public function update(Request $request, Product $product): ProductResource
@@ -76,11 +85,18 @@ class ProductController extends Controller
             'price' => ['sometimes', 'numeric', 'min:0'],
             'cost_price' => ['sometimes', 'numeric', 'min:0'],
             'is_active' => ['boolean'],
+            'units' => ['nullable', 'array'],
+            'units.*.name' => ['required_with:units', 'string'],
+            'units.*.conversion_factor' => ['required_with:units', 'numeric', 'min:0.0001'],
         ]);
 
-        $product->update($validated);
+        $product->update(collect($validated)->except('units')->all());
 
-        return new ProductResource($product->load('category.parent'));
+        if (array_key_exists('units', $validated)) {
+            $this->syncUnits($product, $validated['units'] ?? []);
+        }
+
+        return new ProductResource($product->load(['category.parent', 'units']));
     }
 
     public function destroy(Product $product): JsonResponse
@@ -88,5 +104,76 @@ class ProductController extends Controller
         $product->delete();
 
         return response()->json(null, 204);
+    }
+
+    public function bulkImport(Request $request): JsonResponse
+    {
+        $request->validate(['rows' => ['required', 'array', 'min:1']]);
+
+        $orgId = $this->orgId();
+        $existingCodes = Product::pluck('code')
+            ->map(fn ($c) => strtolower($c))
+            ->flip()
+            ->all();
+
+        $success = 0;
+        $errors = [];
+
+        foreach ($request->rows as $i => $row) {
+            $rowNum = $i + 2;
+            $v = Validator::make($row, [
+                'code' => 'required|string',
+                'name' => 'required|string',
+                'unit' => 'required|string',
+                'price' => 'required|numeric|min:0',
+                'cost_price' => 'required|numeric|min:0',
+            ]);
+
+            if ($v->fails()) {
+                $errors[] = ['row' => $rowNum, 'code' => $row['code'] ?? '—', 'reason' => implode('; ', $v->errors()->all())];
+
+                continue;
+            }
+
+            $code = trim($row['code']);
+            if (isset($existingCodes[strtolower($code)])) {
+                $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Mã sản phẩm đã tồn tại'];
+
+                continue;
+            }
+
+            try {
+                Product::create([
+                    'organization_id' => $orgId,
+                    'code' => $code,
+                    'name' => trim($row['name']),
+                    'unit' => trim($row['unit']),
+                    'price' => (float) $row['price'],
+                    'cost_price' => (float) $row['cost_price'],
+                    'barcode' => $row['barcode'] ?: null,
+                    'description' => $row['description'] ?: null,
+                    'is_active' => true,
+                ]);
+                $existingCodes[strtolower($code)] = true;
+                $success++;
+            } catch (\Throwable $e) {
+                $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Lỗi không xác định'];
+            }
+        }
+
+        return response()->json(['success' => $success, 'failed' => count($errors), 'errors' => $errors]);
+    }
+
+    /** @param  array<array{name: string, conversion_factor: float}>  $units */
+    private function syncUnits(Product $product, array $units): void
+    {
+        $product->units()->delete();
+
+        foreach ($units as $unit) {
+            $product->units()->create([
+                'name' => $unit['name'],
+                'conversion_factor' => $unit['conversion_factor'],
+            ]);
+        }
     }
 }

@@ -21,6 +21,11 @@ class ProductResource extends JsonResource
             'price' => $this->price,
             'cost_price' => $this->cost_price,
             'is_active' => $this->is_active,
+            'units' => $this->whenLoaded('units', fn () => $this->units->map(fn ($u) => [
+                'id' => $u->id,
+                'name' => $u->name,
+                'conversion_factor' => (float) $u->conversion_factor,
+            ])),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

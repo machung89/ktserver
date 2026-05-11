@@ -10,6 +10,7 @@ use App\Models\Company;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 
 class CompanyController extends Controller
@@ -99,5 +100,75 @@ class CompanyController extends Controller
         $company->delete();
 
         return response()->json(null, 204);
+    }
+
+    public function bulkImport(Request $request): JsonResponse
+    {
+        $request->validate(['rows' => ['required', 'array', 'min:1']]);
+
+        $orgId = $this->orgId();
+        $existingNames = Company::pluck('name')
+            ->map(fn ($n) => strtolower($n))
+            ->flip()
+            ->all();
+        $existingTaxCodes = Company::whereNotNull('tax_code')
+            ->pluck('tax_code')
+            ->flip()
+            ->all();
+
+        $success = 0;
+        $errors = [];
+
+        foreach ($request->rows as $i => $row) {
+            $rowNum = $i + 2;
+            $v = Validator::make($row, [
+                'name' => 'required|string',
+                'type' => ['required', Rule::enum(CompanyType::class)],
+            ]);
+
+            if ($v->fails()) {
+                $errors[] = ['row' => $rowNum, 'name' => $row['name'] ?? '—', 'reason' => implode('; ', $v->errors()->all())];
+
+                continue;
+            }
+
+            $name = trim($row['name']);
+            if (isset($existingNames[strtolower($name)])) {
+                $errors[] = ['row' => $rowNum, 'name' => $name, 'reason' => 'Tên đã tồn tại'];
+
+                continue;
+            }
+
+            $taxCode = $row['tax_code'] ?: null;
+            if ($taxCode && isset($existingTaxCodes[$taxCode])) {
+                $errors[] = ['row' => $rowNum, 'name' => $name, 'reason' => 'Mã số thuế đã tồn tại'];
+
+                continue;
+            }
+
+            try {
+                Company::create([
+                    'organization_id' => $orgId,
+                    'name' => $name,
+                    'type' => $row['type'],
+                    'tax_code' => $taxCode,
+                    'phone' => $row['phone'] ?: null,
+                    'email' => $row['email'] ?: null,
+                    'address' => $row['address'] ?: null,
+                    'city' => $row['city'] ?: null,
+                    'representative' => $row['representative'] ?: null,
+                    'is_active' => true,
+                ]);
+                $existingNames[strtolower($name)] = true;
+                if ($taxCode) {
+                    $existingTaxCodes[$taxCode] = true;
+                }
+                $success++;
+            } catch (\Throwable $e) {
+                $errors[] = ['row' => $rowNum, 'name' => $name, 'reason' => 'Lỗi không xác định'];
+            }
+        }
+
+        return response()->json(['success' => $success, 'failed' => count($errors), 'errors' => $errors]);
     }
 }

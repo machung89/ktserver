@@ -20,6 +20,12 @@ class SalesOrderService
     public function confirm(SalesOrder $order): SalesOrder
     {
         return DB::transaction(function () use ($order) {
+            $order = SalesOrder::lockForUpdate()->find($order->id);
+
+            if ($order->status !== OrderStatus::Draft) {
+                throw ValidationException::withMessages(['status' => ['Chỉ có thể xác nhận đơn ở trạng thái nháp.']]);
+            }
+
             $order->load('items.product');
 
             $org = Organization::find(app('orgId'));
@@ -253,7 +259,7 @@ class SalesOrderService
                 'product_id' => $item->product_id,
                 'warehouse_id' => $item->warehouse_id,
                 'organization_id' => $orgId,
-            ])->first();
+            ])->lockForUpdate()->first();
 
             // Tại thời điểm confirm, reservation của đơn này đã được tính vào reserved_quantity.
             // Kiểm tra tồn kho thực tế (quantity) phải đủ để xuất.

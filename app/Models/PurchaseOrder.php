@@ -14,7 +14,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
-#[Fillable(['order_number', 'company_id', 'warehouse_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'notes', 'organization_id', 'payment_status', 'paid_amount'])]
+#[Fillable(['order_number', 'company_id', 'warehouse_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'notes', 'organization_id', 'payment_status', 'paid_amount', 'created_by'])]
 class PurchaseOrder extends Model
 {
     /** @use HasFactory<PurchaseOrderFactory> */
@@ -37,6 +37,11 @@ class PurchaseOrder extends Model
             'total_amount' => 'decimal:2',
             'paid_amount' => 'decimal:2',
         ];
+    }
+
+    public function createdBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 
     public function company(): BelongsTo

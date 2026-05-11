@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 
-#[Fillable(['payment_number', 'type', 'company_id', 'account_id', 'expense_account_id', 'payment_date', 'amount', 'description', 'organization_id', 'reference_type', 'reference_id'])]
+#[Fillable(['payment_number', 'type', 'company_id', 'account_id', 'expense_account_id', 'payment_date', 'amount', 'description', 'organization_id', 'reference_type', 'reference_id', 'is_advance'])]
 class Payment extends Model
 {
     /** @use HasFactory<PaymentFactory> */
@@ -28,6 +28,7 @@ class Payment extends Model
             'type' => PaymentType::class,
             'payment_date' => 'date',
             'amount' => 'decimal:2',
+            'is_advance' => 'boolean',
         ];
     }
 

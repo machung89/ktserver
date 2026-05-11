@@ -6,6 +6,7 @@ use App\Enums\OrderStatus;
 use App\Enums\TransactionType;
 use App\Models\PurchaseOrder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class PurchaseOrderService
 {
@@ -17,6 +18,12 @@ class PurchaseOrderService
     public function confirm(PurchaseOrder $order): PurchaseOrder
     {
         return DB::transaction(function () use ($order) {
+            $order = PurchaseOrder::lockForUpdate()->find($order->id);
+
+            if ($order->status !== OrderStatus::Draft) {
+                throw ValidationException::withMessages(['status' => ['Chỉ có thể xác nhận phiếu ở trạng thái nháp.']]);
+            }
+
             $order->load('items.product');
 
             $order->update(['status' => OrderStatus::Confirmed]);

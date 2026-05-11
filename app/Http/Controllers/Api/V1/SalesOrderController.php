@@ -10,6 +10,7 @@ use App\Models\Inventory;
 use App\Models\Organization;
 use App\Models\Product;
 use App\Models\SalesOrder;
+use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\SalesOrderService;
 use Illuminate\Http\JsonResponse;
@@ -27,7 +28,12 @@ class SalesOrderController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
+        /** @var User $user */
+        $user = Auth::user();
+        $canViewAll = $user->hasPermission('sales.view_all');
+
         $orders = SalesOrder::with(['company', 'createdBy'])
+            ->when(! $canViewAll, fn ($q) => $q->where('created_by', Auth::id()))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->search, function ($q, $v) {
@@ -44,13 +50,18 @@ class SalesOrderController extends Controller
 
     public function counts(): JsonResponse
     {
-        $counts = SalesOrder::selectRaw('status, COUNT(*) as cnt')
+        /** @var User $user */
+        $user = Auth::user();
+        $canViewAll = $user->hasPermission('sales.view_all');
+        $base = SalesOrder::when(! $canViewAll, fn ($q) => $q->where('created_by', Auth::id()));
+
+        $counts = (clone $base)->selectRaw('status, COUNT(*) as cnt')
             ->groupBy('status')
             ->get()
             ->mapWithKeys(fn ($r) => [$r->getRawOriginal('status') => (int) $r->cnt]);
 
         return response()->json([
-            'all' => (int) SalesOrder::count(),
+            'all' => (int) (clone $base)->count(),
             'draft' => $counts['draft'] ?? 0,
             'confirmed' => $counts['confirmed'] ?? 0,
             'shipping' => $counts['shipping'] ?? 0,
@@ -78,103 +89,109 @@ class SalesOrderController extends Controller
 
         $orgId = $this->orgId();
         $org = Organization::find($orgId);
+        $allowNegativeStock = $org->setting('allow_negative_stock', false);
+        $stockErrors = [];
 
-        // Kiểm tra tồn kho khả dụng trước khi tạo đơn
-        if (! $org->setting('allow_negative_stock', false)) {
-            $stockErrors = [];
-            foreach ($validated['items'] as $item) {
-                $inventory = Inventory::where([
-                    'product_id' => $item['product_id'],
-                    'warehouse_id' => $item['warehouse_id'],
+        try {
+            $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, &$stockErrors) {
+                if (! $allowNegativeStock) {
+                    foreach ($validated['items'] as $item) {
+                        $inventory = Inventory::where([
+                            'product_id' => $item['product_id'],
+                            'warehouse_id' => $item['warehouse_id'],
+                            'organization_id' => $orgId,
+                        ])->lockForUpdate()->first();
+
+                        $available = $inventory ? (float) $inventory->available_quantity : 0;
+                        $requested = (float) $item['quantity'];
+
+                        if ($requested > $available) {
+                            $product = Product::find($item['product_id']);
+                            $warehouse = Warehouse::find($item['warehouse_id']);
+                            $stockErrors[] = [
+                                'product_id' => $item['product_id'],
+                                'warehouse_id' => $item['warehouse_id'],
+                                'product_name' => $product?->name ?? '',
+                                'product_code' => $product?->code ?? '',
+                                'warehouse_name' => $warehouse?->name ?? '',
+                                'requested' => $requested,
+                                'available' => $available,
+                                'shortage' => $requested - $available,
+                            ];
+                        }
+                    }
+
+                    if (! empty($stockErrors)) {
+                        throw new \RuntimeException('__stock_insufficient__');
+                    }
+                }
+
+                $order = SalesOrder::create([
+                    'order_number' => $this->generateOrderNumber(),
+                    'status' => OrderStatus::Draft,
                     'organization_id' => $orgId,
-                ])->first();
+                    'company_id' => $validated['company_id'],
+                    'order_date' => $validated['order_date'],
+                    'notes' => $validated['notes'] ?? null,
+                    'subtotal' => 0,
+                    'tax_amount' => 0,
+                    'total_amount' => 0,
+                    'created_by' => Auth::id(),
+                ]);
 
-                $available = $inventory ? (float) $inventory->available_quantity : 0;
-                $requested = (float) $item['quantity'];
+                $subtotal = 0;
+                $taxAmount = 0;
 
-                if ($requested > $available) {
-                    $product = Product::find($item['product_id']);
-                    $warehouse = Warehouse::find($item['warehouse_id']);
-                    $stockErrors[] = [
+                foreach ($validated['items'] as $item) {
+                    $base = (float) $item['quantity'] * (float) $item['unit_price'];
+                    $discountType = $item['discount_type'] ?? null;
+                    $discountValue = (float) ($item['discount_value'] ?? 0);
+                    $discountAmount = match ($discountType) {
+                        'percent' => $base * $discountValue / 100,
+                        'fixed' => min($discountValue, $base),
+                        default => 0,
+                    };
+                    $amount = $base - $discountAmount;
+                    $taxRate = (float) ($item['tax_rate'] ?? 0);
+                    $subtotal += $amount;
+                    $taxAmount += $amount * $taxRate / 100;
+
+                    $order->items()->create([
                         'product_id' => $item['product_id'],
                         'warehouse_id' => $item['warehouse_id'],
-                        'product_name' => $product?->name ?? '',
-                        'product_code' => $product?->code ?? '',
-                        'warehouse_name' => $warehouse?->name ?? '',
-                        'requested' => $requested,
-                        'available' => $available,
-                        'shortage' => $requested - $available,
-                    ];
-                }
-            }
+                        'quantity' => $item['quantity'],
+                        'unit_price' => $item['unit_price'],
+                        'discount_type' => $discountType,
+                        'discount_value' => $discountValue,
+                        'cost_price' => $item['cost_price'] ?? 0,
+                        'tax_rate' => $taxRate,
+                        'amount' => $amount,
+                    ]);
 
-            if (! empty($stockErrors)) {
+                    $inventory = Inventory::lockForUpdate()->firstOrCreate(
+                        ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                        ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                    );
+                    $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                }
+
+                $order->update([
+                    'subtotal' => $subtotal,
+                    'tax_amount' => $taxAmount,
+                    'total_amount' => $subtotal + $taxAmount,
+                ]);
+
+                return $order;
+            });
+        } catch (\RuntimeException $e) {
+            if ($e->getMessage() === '__stock_insufficient__') {
                 return response()->json([
                     'message' => 'Tồn kho không đủ cho một số sản phẩm.',
                     'stock_errors' => $stockErrors,
                 ], 422);
             }
+            throw $e;
         }
-
-        $order = DB::transaction(function () use ($validated, $orgId) {
-            $order = SalesOrder::create([
-                'order_number' => $this->generateOrderNumber(),
-                'status' => OrderStatus::Draft,
-                'organization_id' => $orgId,
-                'company_id' => $validated['company_id'],
-                'order_date' => $validated['order_date'],
-                'notes' => $validated['notes'] ?? null,
-                'subtotal' => 0,
-                'tax_amount' => 0,
-                'total_amount' => 0,
-                'created_by' => Auth::id(),
-            ]);
-
-            $subtotal = 0;
-            $taxAmount = 0;
-
-            foreach ($validated['items'] as $item) {
-                $base = (float) $item['quantity'] * (float) $item['unit_price'];
-                $discountType = $item['discount_type'] ?? null;
-                $discountValue = (float) ($item['discount_value'] ?? 0);
-                $discountAmount = match ($discountType) {
-                    'percent' => $base * $discountValue / 100,
-                    'fixed' => min($discountValue, $base),
-                    default => 0,
-                };
-                $amount = $base - $discountAmount;
-                $taxRate = (float) ($item['tax_rate'] ?? 0);
-                $subtotal += $amount;
-                $taxAmount += $amount * $taxRate / 100;
-
-                $order->items()->create([
-                    'product_id' => $item['product_id'],
-                    'warehouse_id' => $item['warehouse_id'],
-                    'quantity' => $item['quantity'],
-                    'unit_price' => $item['unit_price'],
-                    'discount_type' => $discountType,
-                    'discount_value' => $discountValue,
-                    'cost_price' => $item['cost_price'] ?? 0,
-                    'tax_rate' => $taxRate,
-                    'amount' => $amount,
-                ]);
-
-                // Giữ chỗ tồn kho
-                $inventory = Inventory::firstOrCreate(
-                    ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                    ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                );
-                $inventory->increment('reserved_quantity', (float) $item['quantity']);
-            }
-
-            $order->update([
-                'subtotal' => $subtotal,
-                'tax_amount' => $taxAmount,
-                'total_amount' => $subtotal + $taxAmount,
-            ]);
-
-            return $order;
-        });
 
         return (new SalesOrderResource($order->load(['company', 'createdBy', 'items.product', 'items.warehouse'])))
             ->response()->setStatusCode(201);
@@ -182,6 +199,12 @@ class SalesOrderController extends Controller
 
     public function show(SalesOrder $salesOrder): SalesOrderResource
     {
+        /** @var User $user */
+        $user = Auth::user();
+        if (! $user->hasPermission('sales.view_all') && $salesOrder->created_by !== $user->id) {
+            abort(403, 'Bạn không có quyền xem đơn hàng này.');
+        }
+
         return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'items.product', 'items.warehouse']));
     }
 
@@ -294,6 +317,107 @@ class SalesOrderController extends Controller
             'failed' => count($errors),
             'errors' => $errors,
         ]);
+    }
+
+    public function bulkImport(Request $request): JsonResponse
+    {
+        $request->validate([
+            'orders' => ['required', 'array', 'min:1'],
+            'orders.*.company_id' => ['required', 'exists:companies,id'],
+            'orders.*.order_date' => ['required', 'date'],
+            'orders.*.items' => ['required', 'array', 'min:1'],
+        ]);
+
+        $orgId = $this->orgId();
+        $org = Organization::find($orgId);
+        $allowNegativeStock = $org->setting('allow_negative_stock', false);
+        $success = 0;
+        $errors = [];
+
+        foreach ($request->orders as $i => $orderData) {
+            $row = $orderData['_row'] ?? ($i + 2);
+            $companyName = $orderData['_company'] ?? "Đơn #{$i}";
+
+            try {
+                DB::transaction(function () use ($orderData, $orgId, $allowNegativeStock) {
+                    if (! $allowNegativeStock) {
+                        foreach ($orderData['items'] as $item) {
+                            $inventory = Inventory::where([
+                                'product_id' => $item['product_id'],
+                                'warehouse_id' => $item['warehouse_id'],
+                                'organization_id' => $orgId,
+                            ])->lockForUpdate()->first();
+
+                            $available = $inventory ? (float) $inventory->available_quantity : 0;
+                            if ((float) $item['quantity'] > $available) {
+                                $product = Product::find($item['product_id']);
+                                throw new \RuntimeException("Sản phẩm \"{$product?->name}\" không đủ tồn kho (yêu cầu: {$item['quantity']}, khả dụng: {$available})");
+                            }
+                        }
+                    }
+
+                    $order = SalesOrder::create([
+                        'order_number' => $this->generateOrderNumber(),
+                        'status' => OrderStatus::Draft,
+                        'organization_id' => $orgId,
+                        'company_id' => $orderData['company_id'],
+                        'order_date' => $orderData['order_date'],
+                        'notes' => $orderData['notes'] ?? null,
+                        'subtotal' => 0,
+                        'tax_amount' => 0,
+                        'total_amount' => 0,
+                        'created_by' => Auth::id(),
+                    ]);
+
+                    $subtotal = 0;
+                    $taxAmount = 0;
+
+                    foreach ($orderData['items'] as $item) {
+                        $base = (float) $item['quantity'] * (float) $item['unit_price'];
+                        $discountType = $item['discount_type'] ?? null;
+                        $discountValue = (float) ($item['discount_value'] ?? 0);
+                        $discountAmount = match ($discountType) {
+                            'percent' => $base * $discountValue / 100,
+                            'fixed' => min($discountValue, $base),
+                            default => 0,
+                        };
+                        $amount = $base - $discountAmount;
+                        $taxRate = (float) ($item['tax_rate'] ?? 0);
+                        $subtotal += $amount;
+                        $taxAmount += $amount * $taxRate / 100;
+
+                        $order->items()->create([
+                            'product_id' => $item['product_id'],
+                            'warehouse_id' => $item['warehouse_id'],
+                            'quantity' => $item['quantity'],
+                            'unit_price' => $item['unit_price'],
+                            'discount_type' => $discountType,
+                            'discount_value' => $discountValue,
+                            'cost_price' => $item['cost_price'] ?? 0,
+                            'tax_rate' => $taxRate,
+                            'amount' => $amount,
+                        ]);
+
+                        $inventory = Inventory::lockForUpdate()->firstOrCreate(
+                            ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                            ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                        );
+                        $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                    }
+
+                    $order->update([
+                        'subtotal' => $subtotal,
+                        'tax_amount' => $taxAmount,
+                        'total_amount' => $subtotal + $taxAmount,
+                    ]);
+                });
+                $success++;
+            } catch (\Throwable $e) {
+                $errors[] = ['row' => $row, 'company' => $companyName, 'reason' => $e->getMessage()];
+            }
+        }
+
+        return response()->json(['success' => $success, 'failed' => count($errors), 'errors' => $errors]);
     }
 
     private function generateOrderNumber(): string

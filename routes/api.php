@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\ProfileController;
 use App\Http\Controllers\Api\V1\AccountController;
 use App\Http\Controllers\Api\V1\CompanyController;
 use App\Http\Controllers\Api\V1\EmployeeController;
+use App\Http\Controllers\Api\V1\FixedAssetController;
 use App\Http\Controllers\Api\V1\InventoryController;
 use App\Http\Controllers\Api\V1\JournalEntryController;
 use App\Http\Controllers\Api\V1\OrganizationController;
@@ -64,6 +65,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('products/{product}', [ProductController::class, 'show']);
         });
         Route::post('products', [ProductController::class, 'store'])->middleware('permission:products.create');
+        Route::post('products/import', [ProductController::class, 'bulkImport'])->middleware('permission:products.create');
         Route::put('products/{product}', [ProductController::class, 'update'])->middleware('permission:products.edit');
         Route::delete('products/{product}', [ProductController::class, 'destroy'])->middleware('permission:products.delete');
 
@@ -89,6 +91,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('companies/{company}', [CompanyController::class, 'show']);
         });
         Route::post('companies', [CompanyController::class, 'store'])->middleware('permission:companies.create');
+        Route::post('companies/import', [CompanyController::class, 'bulkImport'])->middleware('permission:companies.create');
         Route::put('companies/{company}', [CompanyController::class, 'update'])->middleware('permission:companies.edit');
         Route::delete('companies/{company}', [CompanyController::class, 'destroy'])->middleware('permission:companies.delete');
 
@@ -120,6 +123,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('sales/{salesOrder}', [SalesOrderController::class, 'show']);
         });
         Route::post('sales', [SalesOrderController::class, 'store'])->middleware('permission:sales.create');
+        Route::post('sales/import', [SalesOrderController::class, 'bulkImport'])->middleware('permission:sales.create');
         Route::put('sales/{salesOrder}', [SalesOrderController::class, 'update'])->middleware('permission:sales.edit');
         Route::post('sales/bulk-confirm', [SalesOrderController::class, 'bulkConfirm'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/confirm', [SalesOrderController::class, 'confirm'])->middleware('permission:sales.confirm');
@@ -130,8 +134,15 @@ Route::middleware('auth:sanctum')->group(function (): void {
 
         // Thanh toán
         Route::get('payments', [PaymentController::class, 'index'])->middleware('permission:payments.view');
+        Route::get('payments/advance-balance', [PaymentController::class, 'advanceBalance'])->middleware('permission:payments.view');
         Route::get('payments/{payment}', [PaymentController::class, 'show'])->middleware('permission:payments.view');
         Route::post('payments', [PaymentController::class, 'store'])->middleware('permission:payments.create');
+
+        // Tài sản cố định
+        Route::get('fixed-assets', [FixedAssetController::class, 'index'])->middleware('permission:assets.view');
+        Route::get('fixed-assets/{fixedAsset}', [FixedAssetController::class, 'show'])->middleware('permission:assets.view');
+        Route::post('fixed-assets', [FixedAssetController::class, 'store'])->middleware('permission:assets.create');
+        Route::post('fixed-assets/{fixedAsset}/depreciate', [FixedAssetController::class, 'postDepreciation'])->middleware('permission:assets.create');
 
         // Kế toán
         Route::middleware('permission:accounts.view')->group(function () {

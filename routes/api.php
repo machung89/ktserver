@@ -6,12 +6,14 @@ use App\Http\Controllers\Api\V1\AccountController;
 use App\Http\Controllers\Api\V1\CompanyController;
 use App\Http\Controllers\Api\V1\EmployeeController;
 use App\Http\Controllers\Api\V1\FixedAssetController;
+use App\Http\Controllers\Api\V1\InventoryAdjustmentController;
 use App\Http\Controllers\Api\V1\InventoryController;
 use App\Http\Controllers\Api\V1\JournalEntryController;
 use App\Http\Controllers\Api\V1\OrganizationController;
 use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Controllers\Api\V1\ProductCategoryController;
 use App\Http\Controllers\Api\V1\ProductController;
+use App\Http\Controllers\Api\V1\PromotionController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\RoleController;
@@ -103,6 +105,12 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('inventory/warehouse/{warehouse}', [InventoryController::class, 'byWarehouse']);
         });
 
+        // Điều chỉnh tồn kho
+        Route::get('inventory/adjustments', [InventoryAdjustmentController::class, 'index'])->middleware('permission:inventory.view');
+        Route::post('inventory/adjustments', [InventoryAdjustmentController::class, 'store'])->middleware('permission:inventory.adjust');
+        Route::get('inventory/adjustments/{adjustment}', [InventoryAdjustmentController::class, 'show'])->middleware('permission:inventory.view');
+        Route::delete('inventory/adjustments/{adjustment}', [InventoryAdjustmentController::class, 'destroy'])->middleware('permission:inventory.adjust');
+
         // Mua hàng
         Route::middleware('permission:purchases.view')->group(function () {
             Route::get('purchases', [PurchaseOrderController::class, 'index']);
@@ -115,6 +123,16 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('purchases/{purchaseOrder}/ship', [PurchaseOrderController::class, 'ship'])->middleware('permission:purchases.confirm');
         Route::post('purchases/{purchaseOrder}/complete', [PurchaseOrderController::class, 'complete'])->middleware('permission:purchases.confirm');
         Route::post('purchases/{purchaseOrder}/cancel', [PurchaseOrderController::class, 'cancel'])->middleware('permission:purchases.cancel');
+
+        // Khuyến mại
+        Route::get('promotions/applicable', [PromotionController::class, 'applicable'])->middleware('permission:sales.create');
+        Route::middleware('permission:promotions.view')->group(function () {
+            Route::get('promotions', [PromotionController::class, 'index']);
+            Route::get('promotions/{promotion}', [PromotionController::class, 'show']);
+        });
+        Route::post('promotions', [PromotionController::class, 'store'])->middleware('permission:promotions.create');
+        Route::put('promotions/{promotion}', [PromotionController::class, 'update'])->middleware('permission:promotions.edit');
+        Route::delete('promotions/{promotion}', [PromotionController::class, 'destroy'])->middleware('permission:promotions.delete');
 
         // Bán hàng
         Route::middleware('permission:sales.view')->group(function () {
@@ -169,6 +187,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance']);
             Route::get('reports/balance-sheet', [ReportController::class, 'balanceSheet']);
             Route::get('reports/income-statement', [ReportController::class, 'incomeStatement']);
+            Route::get('reports/sales-by-employee', [ReportController::class, 'salesByEmployee']);
         });
 
         // Cài đặt — chỉ admin

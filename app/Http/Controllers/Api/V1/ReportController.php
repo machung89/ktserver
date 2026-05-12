@@ -479,6 +479,57 @@ class ReportController extends Controller
         ]);
     }
 
+    public function salesByEmployee(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+
+        $rows = DB::table('sales_orders as so')
+            ->join('users as u', 'u.id', '=', 'so.created_by')
+            ->leftJoin('sales_order_items as soi', function ($j) {
+                $j->on('soi.sales_order_id', '=', 'so.id')->where('soi.is_return', false);
+            })
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->groupBy('u.id', 'u.name', 'u.department', 'u.position')
+            ->select([
+                'u.id as user_id',
+                'u.name',
+                'u.department',
+                'u.position',
+                DB::raw('COUNT(DISTINCT so.id) as order_count'),
+                DB::raw('SUM(so.total_amount) as revenue'),
+                DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+            ])
+            ->orderByDesc(DB::raw('SUM(so.total_amount)'))
+            ->get()
+            ->map(function ($r) {
+                $revenue = round((float) $r->revenue, 2);
+                $cost = round((float) $r->cost, 2);
+                $profit = round($revenue - $cost, 2);
+
+                return [
+                    'user_id' => $r->user_id,
+                    'name' => $r->name,
+                    'department' => $r->department,
+                    'position' => $r->position,
+                    'order_count' => (int) $r->order_count,
+                    'revenue' => $revenue,
+                    'cost' => $cost,
+                    'profit' => $profit,
+                    'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                ];
+            });
+
+        return response()->json([
+            'data' => $rows,
+            'total_revenue' => round($rows->sum('revenue'), 2),
+            'total_cost' => round($rows->sum('cost'), 2),
+            'total_profit' => round($rows->sum('profit'), 2),
+        ]);
+    }
+
     private function calculateNetProfit(int $orgId, ?string $from, string $to): float
     {
         $result = DB::table('journal_entry_lines as jel')

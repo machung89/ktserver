@@ -24,7 +24,10 @@ class RolePermissionSeeder extends Seeder
                 ['warehouses.edit', 'Sửa kho'],
                 ['warehouses.delete', 'Xóa kho'],
             ],
-            'inventory' => [['inventory.view', 'Xem tồn kho']],
+            'inventory' => [
+                ['inventory.view', 'Xem tồn kho'],
+                ['inventory.adjust', 'Điều chỉnh tồn kho'],
+            ],
             'companies' => [
                 ['companies.view', 'Xem đối tác'],
                 ['companies.create', 'Thêm đối tác'],
@@ -61,6 +64,12 @@ class RolePermissionSeeder extends Seeder
                 ['assets.create', 'Thêm / ghi sổ khấu hao'],
             ],
             'journal' => [['journal.view', 'Xem nhật ký']],
+            'promotions' => [
+                ['promotions.view', 'Xem chương trình khuyến mại'],
+                ['promotions.create', 'Thêm khuyến mại'],
+                ['promotions.edit', 'Sửa khuyến mại'],
+                ['promotions.delete', 'Xóa khuyến mại'],
+            ],
             'reports' => [['reports.view', 'Xem báo cáo']],
             'employees' => [
                 ['employees.view', 'Xem nhân viên'],

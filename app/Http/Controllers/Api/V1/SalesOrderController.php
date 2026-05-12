@@ -76,6 +76,9 @@ class SalesOrderController extends Controller
             'company_id' => ['required', 'exists:companies,id'],
             'order_date' => ['required', 'date'],
             'notes' => ['nullable', 'string'],
+            'discount_type' => ['nullable', 'in:percent,fixed'],
+            'discount_value' => ['nullable', 'numeric', 'min:0'],
+            'promotion_id' => ['nullable', 'integer'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.warehouse_id' => ['required', 'exists:warehouses,id'],
@@ -133,8 +136,11 @@ class SalesOrderController extends Controller
                     'company_id' => $validated['company_id'],
                     'order_date' => $validated['order_date'],
                     'notes' => $validated['notes'] ?? null,
+                    'discount_type' => $validated['discount_type'] ?? null,
+                    'discount_value' => $validated['discount_value'] ?? 0,
                     'subtotal' => 0,
                     'tax_amount' => 0,
+                    'discount_amount' => 0,
                     'total_amount' => 0,
                     'created_by' => Auth::id(),
                 ]);
@@ -175,10 +181,19 @@ class SalesOrderController extends Controller
                     $inventory->increment('reserved_quantity', (float) $item['quantity']);
                 }
 
+                $orderDiscountType = $validated['discount_type'] ?? null;
+                $orderDiscountValue = (float) ($validated['discount_value'] ?? 0);
+                $orderDiscountAmount = match ($orderDiscountType) {
+                    'percent' => $subtotal * $orderDiscountValue / 100,
+                    'fixed' => min($orderDiscountValue, $subtotal),
+                    default => 0,
+                };
+
                 $order->update([
                     'subtotal' => $subtotal,
                     'tax_amount' => $taxAmount,
-                    'total_amount' => $subtotal + $taxAmount,
+                    'discount_amount' => $orderDiscountAmount,
+                    'total_amount' => $subtotal + $taxAmount - $orderDiscountAmount,
                 ]);
 
                 return $order;
@@ -218,9 +233,35 @@ class SalesOrderController extends Controller
             'company_id' => ['sometimes', 'exists:companies,id'],
             'order_date' => ['sometimes', 'date'],
             'notes' => ['nullable', 'string'],
+            'discount_type' => ['nullable', 'in:percent,fixed'],
+            'discount_value' => ['nullable', 'numeric', 'min:0'],
+            'promotion_id' => ['nullable', 'integer'],
+            'items' => ['sometimes', 'array', 'min:1'],
+            'items.*.product_id' => ['required_with:items', 'exists:products,id'],
+            'items.*.warehouse_id' => ['required_with:items', 'exists:warehouses,id'],
+            'items.*.quantity' => ['required_with:items', 'numeric', 'min:0.001'],
+            'items.*.unit_price' => ['required_with:items', 'numeric', 'min:0'],
+            'items.*.cost_price' => ['nullable', 'numeric', 'min:0'],
+            'items.*.discount_type' => ['nullable', 'in:percent,fixed'],
+            'items.*.discount_value' => ['nullable', 'numeric', 'min:0'],
+            'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
 
-        $salesOrder->update($validated);
+        $headerData = collect($validated)->except('items')->toArray();
+
+        if (isset($headerData['discount_type']) || isset($headerData['discount_value'])) {
+            $discountType = $headerData['discount_type'] ?? $salesOrder->discount_type;
+            $discountValue = (float) ($headerData['discount_value'] ?? $salesOrder->discount_value ?? 0);
+            $subtotal = (float) $salesOrder->subtotal;
+            $headerData['discount_amount'] = match ($discountType) {
+                'percent' => $subtotal * $discountValue / 100,
+                'fixed' => min($discountValue, $subtotal),
+                default => 0,
+            };
+            $headerData['total_amount'] = $subtotal + (float) $salesOrder->tax_amount - $headerData['discount_amount'];
+        }
+
+        $salesOrder->update($headerData);
 
         return new SalesOrderResource($salesOrder->load(['company', 'items.product']));
     }

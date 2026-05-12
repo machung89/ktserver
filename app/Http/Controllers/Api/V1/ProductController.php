@@ -18,11 +18,16 @@ class ProductController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
+        $sortable = ['name', 'code', 'price', 'cost_price', 'created_at'];
+        $sortBy = in_array($request->sort_by, $sortable) ? $request->sort_by : 'created_at';
+        $sortDir = $request->sort_dir === 'asc' ? 'asc' : 'desc';
+
         $products = Product::with(['category.parent', 'units'])
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('code', 'like', "%{$v}%"))
             ->when($request->category_id, fn ($q, $v) => $q->where('category_id', $v))
             ->when($request->boolean('active_only', false), fn ($q) => $q->where('is_active', true))
-            ->paginate(20);
+            ->orderBy($sortBy, $sortDir)
+            ->paginate((int) ($request->per_page ?? 20));
 
         return ProductResource::collection($products);
     }
@@ -111,12 +116,18 @@ class ProductController extends Controller
         $request->validate(['rows' => ['required', 'array', 'min:1']]);
 
         $orgId = $this->orgId();
-        $existingCodes = Product::pluck('code')
-            ->map(fn ($c) => strtolower($c))
-            ->flip()
-            ->all();
+        $updateExisting = (bool) $request->boolean('update_existing', false);
+        $allowedUpdateFields = ['name', 'unit', 'price', 'cost_price', 'unit2', 'barcode', 'description'];
+        $updateFields = $updateExisting
+            ? array_intersect($request->input('update_fields', $allowedUpdateFields), $allowedUpdateFields)
+            : [];
+
+        $existingProducts = Product::where('organization_id', $orgId)
+            ->get()
+            ->keyBy(fn ($p) => strtolower($p->code));
 
         $success = 0;
+        $updated = 0;
         $errors = [];
 
         foreach ($request->rows as $i => $row) {
@@ -136,32 +147,61 @@ class ProductController extends Controller
             }
 
             $code = trim($row['code']);
-            if (isset($existingCodes[strtolower($code)])) {
+            $existing = $existingProducts[strtolower($code)] ?? null;
+
+            if ($existing && ! $updateExisting) {
                 $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Mã sản phẩm đã tồn tại'];
 
                 continue;
             }
 
             try {
-                Product::create([
-                    'organization_id' => $orgId,
-                    'code' => $code,
+                $allData = [
                     'name' => trim($row['name']),
                     'unit' => trim($row['unit']),
                     'price' => (float) $row['price'],
                     'cost_price' => (float) $row['cost_price'],
                     'barcode' => $row['barcode'] ?: null,
                     'description' => $row['description'] ?: null,
-                    'is_active' => true,
-                ]);
-                $existingCodes[strtolower($code)] = true;
-                $success++;
+                ];
+
+                if ($existing) {
+                    $fieldsToUpdate = array_intersect_key(
+                        $allData,
+                        array_flip(array_diff($updateFields, ['unit2']))
+                    );
+                    if (! empty($fieldsToUpdate)) {
+                        $existing->update($fieldsToUpdate);
+                    }
+                    $product = $existing;
+                    $updated++;
+                } else {
+                    $product = Product::create(array_merge($allData, [
+                        'organization_id' => $orgId,
+                        'code' => $code,
+                        'is_active' => true,
+                    ]));
+                    $existingProducts[strtolower($code)] = $product;
+                    $success++;
+                }
+
+                $unit2Name = trim($row['unit2'] ?? '');
+                $unit2Factor = (float) ($row['unit2_factor'] ?? 0);
+                $shouldSyncUnit2 = ! $existing || in_array('unit2', $updateFields);
+                if ($shouldSyncUnit2 && $unit2Name !== '' && $unit2Factor > 0) {
+                    $this->syncUnits($product, [['name' => $unit2Name, 'conversion_factor' => $unit2Factor]]);
+                }
             } catch (\Throwable $e) {
                 $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Lỗi không xác định'];
             }
         }
 
-        return response()->json(['success' => $success, 'failed' => count($errors), 'errors' => $errors]);
+        return response()->json([
+            'success' => $success,
+            'updated' => $updated,
+            'failed' => count($errors),
+            'errors' => $errors,
+        ]);
     }
 
     /** @param  array<array{name: string, conversion_factor: float}>  $units */

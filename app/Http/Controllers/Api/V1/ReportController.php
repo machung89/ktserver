@@ -325,14 +325,30 @@ class ReportController extends Controller
 
         $salesRevenue = $sumPrefix('511');
         $financialRevenue = $sumPrefix('515');
-        $deductions = $sumPrefix('521') + $sumPrefix('531') + $sumPrefix('532');
+        // 521/531/532 là tài khoản điều chỉnh doanh thu (dư Nợ), balance = credit-debit < 0
+        // Negate để hiển thị dương và trừ đúng hướng
+        $deductions = -($sumPrefix('521') + $sumPrefix('531') + $sumPrefix('532'));
         $netRevenue = $salesRevenue - $deductions;
         $cogs = $sumPrefix('632');
         $grossProfit = $netRevenue - $cogs;
         $financialExpense = $sumPrefix('635');
         $sellingExpense = $sumPrefix('641');
         $adminExpense = $sumPrefix('642');
-        $operatingProfit = $grossProfit + $financialRevenue - $financialExpense - $sellingExpense - $adminExpense;
+        $productionOverhead = $sumPrefix('627');
+
+        // Các TK chi phí loại 6 chưa được phân loại (628, 623, v.v.) — chỉ lấy 6xx, tránh nhầm 7xx
+        $knownExpensePrefixes = ['632', '635', '641', '642', '627', '821', '811'];
+        $otherOperatingExpense = $rows
+            ->filter(function ($_, $k) use ($knownExpensePrefixes) {
+                $code = (string) $k;
+
+                return str_starts_with($code, '6')
+                    && ! collect($knownExpensePrefixes)->contains(fn ($p) => str_starts_with($code, $p));
+            })
+            ->sum();
+
+        $operatingProfit = $grossProfit + $financialRevenue - $financialExpense
+            - $sellingExpense - $adminExpense - $productionOverhead - $otherOperatingExpense;
         $otherIncome = $sumPrefix('711');
         $otherExpense = $sumPrefix('811');
         $otherProfit = $otherIncome - $otherExpense;
@@ -340,27 +356,40 @@ class ReportController extends Controller
         $incomeTax = $sumPrefix('821');
         $netProfit = $profitBeforeTax - $incomeTax;
 
+        $lines = [
+            ['code' => '01', 'label' => 'Doanh thu bán hàng và cung cấp dịch vụ', 'value' => $salesRevenue],
+            ['code' => '02', 'label' => 'Các khoản giảm trừ doanh thu', 'value' => $deductions],
+            ['code' => '10', 'label' => 'Doanh thu thuần về bán hàng và CCDV', 'value' => $netRevenue, 'bold' => true],
+            ['code' => '11', 'label' => 'Giá vốn hàng bán', 'value' => $cogs],
+            ['code' => '20', 'label' => 'Lợi nhuận gộp về bán hàng và CCDV', 'value' => $grossProfit, 'bold' => true],
+            ['code' => '21', 'label' => 'Doanh thu hoạt động tài chính', 'value' => $financialRevenue],
+            ['code' => '22', 'label' => 'Chi phí tài chính', 'value' => $financialExpense],
+            ['code' => '25', 'label' => 'Chi phí bán hàng', 'value' => $sellingExpense],
+            ['code' => '26', 'label' => 'Chi phí quản lý doanh nghiệp', 'value' => $adminExpense],
+        ];
+
+        if ($productionOverhead != 0) {
+            $lines[] = ['code' => '27', 'label' => 'Chi phí sản xuất chung (627)', 'value' => $productionOverhead];
+        }
+
+        if ($otherOperatingExpense != 0) {
+            $lines[] = ['code' => '28', 'label' => 'Chi phí hoạt động khác', 'value' => $otherOperatingExpense];
+        }
+
+        $lines = array_merge($lines, [
+            ['code' => '30', 'label' => 'Lợi nhuận thuần từ hoạt động kinh doanh', 'value' => $operatingProfit, 'bold' => true],
+            ['code' => '31', 'label' => 'Thu nhập khác', 'value' => $otherIncome],
+            ['code' => '32', 'label' => 'Chi phí khác', 'value' => $otherExpense],
+            ['code' => '40', 'label' => 'Lợi nhuận khác', 'value' => $otherProfit, 'bold' => true],
+            ['code' => '50', 'label' => 'Tổng lợi nhuận kế toán trước thuế', 'value' => $profitBeforeTax, 'bold' => true],
+            ['code' => '51', 'label' => 'Chi phí thuế thu nhập doanh nghiệp', 'value' => $incomeTax],
+            ['code' => '60', 'label' => 'Lợi nhuận sau thuế thu nhập doanh nghiệp', 'value' => $netProfit, 'bold' => true, 'highlight' => true],
+        ]);
+
         return response()->json([
             'from' => $from,
             'to' => $to,
-            'lines' => [
-                ['code' => '01', 'label' => 'Doanh thu bán hàng và cung cấp dịch vụ', 'value' => $salesRevenue],
-                ['code' => '02', 'label' => 'Các khoản giảm trừ doanh thu', 'value' => $deductions],
-                ['code' => '10', 'label' => 'Doanh thu thuần về bán hàng và CCDV', 'value' => $netRevenue, 'bold' => true],
-                ['code' => '11', 'label' => 'Giá vốn hàng bán', 'value' => $cogs],
-                ['code' => '20', 'label' => 'Lợi nhuận gộp về bán hàng và CCDV', 'value' => $grossProfit, 'bold' => true],
-                ['code' => '21', 'label' => 'Doanh thu hoạt động tài chính', 'value' => $financialRevenue],
-                ['code' => '22', 'label' => 'Chi phí tài chính', 'value' => $financialExpense],
-                ['code' => '25', 'label' => 'Chi phí bán hàng', 'value' => $sellingExpense],
-                ['code' => '26', 'label' => 'Chi phí quản lý doanh nghiệp', 'value' => $adminExpense],
-                ['code' => '30', 'label' => 'Lợi nhuận thuần từ hoạt động kinh doanh', 'value' => $operatingProfit, 'bold' => true],
-                ['code' => '31', 'label' => 'Thu nhập khác', 'value' => $otherIncome],
-                ['code' => '32', 'label' => 'Chi phí khác', 'value' => $otherExpense],
-                ['code' => '40', 'label' => 'Lợi nhuận khác', 'value' => $otherProfit, 'bold' => true],
-                ['code' => '50', 'label' => 'Tổng lợi nhuận kế toán trước thuế', 'value' => $profitBeforeTax, 'bold' => true],
-                ['code' => '51', 'label' => 'Chi phí thuế thu nhập doanh nghiệp', 'value' => $incomeTax],
-                ['code' => '60', 'label' => 'Lợi nhuận sau thuế thu nhập doanh nghiệp', 'value' => $netProfit, 'bold' => true, 'highlight' => true],
-            ],
+            'lines' => $lines,
             'net_profit' => $netProfit,
         ]);
     }

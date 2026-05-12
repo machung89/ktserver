@@ -85,7 +85,7 @@ class PurchaseOrderController extends Controller
 
         $order->update(['subtotal' => $subtotal, 'tax_amount' => $taxAmount, 'total_amount' => $subtotal + $taxAmount]);
 
-        return (new PurchaseOrderResource($order->load(['company', 'warehouse', 'items.product'])))
+        return (new PurchaseOrderResource($order->load(['company', 'warehouse', 'items.product.units'])))
             ->response()->setStatusCode(201);
     }
 
@@ -97,7 +97,7 @@ class PurchaseOrderController extends Controller
             abort(403, 'Bạn không có quyền xem đơn nhập này.');
         }
 
-        return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product']));
+        return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product.units']));
     }
 
     public function update(Request $request, PurchaseOrder $purchaseOrder): PurchaseOrderResource
@@ -115,7 +115,7 @@ class PurchaseOrderController extends Controller
 
         $purchaseOrder->update($validated);
 
-        return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product']));
+        return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product.units']));
     }
 
     public function confirm(PurchaseOrder $purchaseOrder): PurchaseOrderResource

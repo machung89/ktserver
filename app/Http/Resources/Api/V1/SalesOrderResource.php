@@ -14,6 +14,8 @@ class SalesOrderResource extends JsonResource
             'order_number' => $this->order_number,
             'status' => $this->status,
             'company_id' => $this->company_id,
+            'restaurant_table_id' => $this->restaurant_table_id,
+            'restaurant_table_name' => $this->whenLoaded('restaurantTable', fn () => $this->restaurantTable?->name),
             'order_date' => $this->order_date,
             'expected_date' => $this->expected_date,
             'subtotal' => $this->subtotal,

@@ -15,6 +15,7 @@ class ProductResource extends JsonResource
             'barcode' => $this->barcode,
             'name' => $this->name,
             'description' => $this->description,
+            'image_url' => $this->image_path ? asset('storage/'.$this->image_path) : null,
             'unit' => $this->unit,
             'category_id' => $this->category_id,
             'category' => new ProductCategoryResource($this->whenLoaded('category')),

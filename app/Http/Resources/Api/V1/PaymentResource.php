@@ -21,6 +21,7 @@ class PaymentResource extends JsonResource
             'reference_type' => $this->reference_type,
             'reference_id' => $this->reference_id,
             'is_advance' => $this->is_advance,
+            'status' => $this->status,
             'expense_account_id' => $this->expense_account_id,
             'company' => new CompanyResource($this->whenLoaded('company')),
             'account' => new AccountResource($this->whenLoaded('account')),

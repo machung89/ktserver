@@ -44,6 +44,31 @@ class JournalEntryService
         return $entry->load('lines.account');
     }
 
+    /**
+     * @param  array<array{account_code: string, description: string, debit: float, credit: float}>  $lines
+     */
+    public function updateLines(JournalEntry $entry, array $lines): void
+    {
+        $entry->lines()->delete();
+
+        $accountCache = [];
+
+        foreach ($lines as $line) {
+            $code = $line['account_code'];
+
+            if (! isset($accountCache[$code])) {
+                $accountCache[$code] = Account::where('code', $code)->firstOrFail();
+            }
+
+            $entry->lines()->create([
+                'account_id' => $accountCache[$code]->id,
+                'description' => $line['description'] ?? null,
+                'debit_amount' => $line['debit'] ?? 0,
+                'credit_amount' => $line['credit'] ?? 0,
+            ]);
+        }
+    }
+
     private function generateEntryNumber(): string
     {
         $last = JournalEntry::orderByDesc('id')->lockForUpdate()->first();

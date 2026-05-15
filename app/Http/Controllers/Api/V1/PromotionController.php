@@ -6,6 +6,8 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PromotionResource;
 use App\Models\Promotion;
+use App\Models\SalesOrder;
+use App\Models\SalesOrderItem;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -62,6 +64,117 @@ class PromotionController extends Controller
         $promotion->delete();
 
         return response()->json(null, 204);
+    }
+
+    public function usageDetail(Promotion $promotion): JsonResponse
+    {
+        $orgId = $this->orgId();
+        $notCancelled = ['draft', 'confirmed', 'shipping', 'completed'];
+
+        if ($promotion->type === 'buy_x_get_y') {
+            $giftProductId = $promotion->conditions['gift_product_id'] ?? null;
+            if (! $giftProductId) {
+                return response()->json(['data' => []]);
+            }
+
+            $rows = SalesOrderItem::with(['salesOrder.company'])
+                ->where('product_id', $giftProductId)
+                ->where('unit_price', 0)
+                ->whereHas('salesOrder', fn ($q) => $q
+                    ->where('organization_id', $orgId)
+                    ->whereIn('status', $notCancelled)
+                )
+                ->orderByDesc('created_at')
+                ->get()
+                ->map(fn ($item) => [
+                    'order_id' => $item->salesOrder->id,
+                    'order_number' => $item->salesOrder->order_number,
+                    'order_date' => $item->salesOrder->order_date?->format('d/m/Y'),
+                    'customer' => $item->salesOrder->company?->name,
+                    'gift_qty' => (float) $item->quantity,
+                    'status' => $item->salesOrder->getRawOriginal('status'),
+                ]);
+
+            return response()->json(['data' => $rows]);
+        }
+
+        if ($promotion->type === 'order_discount') {
+            $rows = SalesOrder::with('company')
+                ->where('organization_id', $orgId)
+                ->where('promotion_id', $promotion->id)
+                ->whereIn('status', $notCancelled)
+                ->orderByDesc('order_date')
+                ->get()
+                ->map(fn ($o) => [
+                    'order_id' => $o->id,
+                    'order_number' => $o->order_number,
+                    'order_date' => $o->order_date?->format('d/m/Y'),
+                    'customer' => $o->company?->name,
+                    'total_amount' => (float) $o->total_amount,
+                    'discount_type' => $o->discount_type,
+                    'discount_value' => (float) $o->discount_value,
+                    'status' => $o->getRawOriginal('status'),
+                ]);
+
+            return response()->json(['data' => $rows]);
+        }
+
+        return response()->json(['data' => []]);
+    }
+
+    public function usageStats(): JsonResponse
+    {
+        $orgId = $this->orgId();
+        $notCancelled = ['draft', 'confirmed', 'shipping', 'completed'];
+
+        // buy_x_get_y: tổng quà đã tặng theo gift_product_id + unit_price = 0
+        $giftProductIds = Promotion::where('organization_id', $orgId)
+            ->where('type', 'buy_x_get_y')
+            ->get()
+            ->mapWithKeys(fn ($p) => [$p->id => $p->conditions['gift_product_id'] ?? null])
+            ->filter();
+
+        $giftStats = SalesOrderItem::whereIn('product_id', $giftProductIds->values())
+            ->where('unit_price', 0)
+            ->whereHas('salesOrder', fn ($q) => $q
+                ->where('organization_id', $orgId)
+                ->whereIn('status', $notCancelled)
+            )
+            ->selectRaw('product_id, SUM(quantity) as total_qty, COUNT(DISTINCT sales_order_id) as order_count')
+            ->groupBy('product_id')
+            ->get()
+            ->keyBy('product_id');
+
+        // order_discount: đếm đơn hàng đã dùng promotion_id
+        $orderStats = SalesOrder::where('organization_id', $orgId)
+            ->whereNotNull('promotion_id')
+            ->whereIn('status', $notCancelled)
+            ->selectRaw('promotion_id, COUNT(*) as order_count')
+            ->groupBy('promotion_id')
+            ->get()
+            ->keyBy('promotion_id');
+
+        $promotions = Promotion::where('organization_id', $orgId)->get();
+
+        $result = $promotions->map(function ($promo) use ($giftStats, $orderStats, $giftProductIds) {
+            $stats = ['order_count' => 0, 'gift_qty' => 0];
+
+            if ($promo->type === 'buy_x_get_y') {
+                $giftProdId = $giftProductIds[$promo->id] ?? null;
+                if ($giftProdId && isset($giftStats[$giftProdId])) {
+                    $stats['gift_qty'] = (float) $giftStats[$giftProdId]->total_qty;
+                    $stats['order_count'] = (int) $giftStats[$giftProdId]->order_count;
+                }
+            } elseif ($promo->type === 'order_discount') {
+                if (isset($orderStats[$promo->id])) {
+                    $stats['order_count'] = (int) $orderStats[$promo->id]->order_count;
+                }
+            }
+
+            return ['id' => $promo->id, ...$stats];
+        });
+
+        return response()->json($result->keyBy('id'));
     }
 
     /**

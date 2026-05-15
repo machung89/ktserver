@@ -19,10 +19,10 @@ class CompanyController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $companies = Company::query()
+        $companies = Company::with(['assignedUser', 'bank'])
             ->when($request->type, fn ($q, $v) => $q->where('type', $v))
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('tax_code', 'like', "%{$v}%"))
-            ->paginate(20);
+            ->paginate(min((int) $request->input('per_page', 20), 500));
 
         return CompanyResource::collection($companies);
     }
@@ -37,18 +37,25 @@ class CompanyController extends Controller
             'email' => ['nullable', 'email'],
             'address' => ['nullable', 'string'],
             'city' => ['nullable', 'string'],
+            'ward' => ['nullable', 'string'],
             'representative' => ['nullable', 'string'],
             'is_active' => ['boolean'],
+            'user_id' => ['nullable', 'exists:users,id'],
+            'bank_id' => ['nullable', 'exists:banks,id'],
+            'bank_account_name' => ['nullable', 'string', 'max:255'],
+            'bank_account_number' => ['nullable', 'string', 'max:50'],
         ]);
+
+        $validated['user_id'] ??= auth()->id();
 
         $company = Company::create(array_merge($validated, ['organization_id' => $this->orgId()]));
 
-        return (new CompanyResource($company))->response()->setStatusCode(201);
+        return (new CompanyResource($company->load(['assignedUser', 'bank'])))->response()->setStatusCode(201);
     }
 
     public function show(Company $company): CompanyResource
     {
-        return new CompanyResource($company);
+        return new CompanyResource($company->load(['assignedUser', 'bank']));
     }
 
     public function stats(Company $company): JsonResponse
@@ -86,13 +93,18 @@ class CompanyController extends Controller
             'email' => ['nullable', 'email'],
             'address' => ['nullable', 'string'],
             'city' => ['nullable', 'string'],
+            'ward' => ['nullable', 'string'],
             'representative' => ['nullable', 'string'],
             'is_active' => ['boolean'],
+            'user_id' => ['nullable', 'exists:users,id'],
+            'bank_id' => ['nullable', 'exists:banks,id'],
+            'bank_account_name' => ['nullable', 'string', 'max:255'],
+            'bank_account_number' => ['nullable', 'string', 'max:50'],
         ]);
 
         $company->update($validated);
 
-        return new CompanyResource($company);
+        return new CompanyResource($company->load(['assignedUser', 'bank']));
     }
 
     public function destroy(Company $company): JsonResponse
@@ -164,7 +176,7 @@ class CompanyController extends Controller
                     $existingTaxCodes[$taxCode] = true;
                 }
                 $success++;
-            } catch (\Throwable $e) {
+            } catch (\Throwable) {
                 $errors[] = ['row' => $rowNum, 'name' => $name, 'reason' => 'Lỗi không xác định'];
             }
         }

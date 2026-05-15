@@ -8,4 +8,5 @@ enum TransactionType: string
     case SalesDelivery = 'sales_delivery';
     case SalesReturn = 'sales_return';
     case Adjustment = 'adjustment';
+    case RecipeConsumption = 'recipe_consumption';
 }

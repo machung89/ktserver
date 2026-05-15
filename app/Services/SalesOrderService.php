@@ -6,6 +6,7 @@ use App\Enums\OrderStatus;
 use App\Enums\TransactionType;
 use App\Models\Inventory;
 use App\Models\Organization;
+use App\Models\Recipe;
 use App\Models\SalesOrder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -38,40 +39,111 @@ class SalesOrderService
 
             $order->update(['status' => OrderStatus::Confirmed]);
 
-            // Snapshot avg_cost từ tồn kho vào từng item (WAC tại thời điểm xuất)
             $orgId = app('orgId');
-            foreach ($order->items as $item) {
-                $inventory = Inventory::where([
-                    'product_id' => $item->product_id,
-                    'warehouse_id' => $item->warehouse_id,
-                    'organization_id' => $orgId,
-                ])->first();
 
-                $avgCost = $inventory ? (float) $inventory->avg_cost : 0;
-                $item->update(['cost_price' => $avgCost]);
+            // Load công thức TRƯỚC khi snapshot cost (cần để tính giá vốn từ nguyên liệu)
+            $productIds = $order->items->pluck('product_id')->unique()->all();
+            $recipes = Recipe::with('ingredients')
+                ->whereIn('product_id', $productIds)
+                ->get()
+                ->keyBy('product_id');
+
+            // Snapshot cost_price vào từng item tại thời điểm xuất (WAC):
+            // - Sản phẩm có công thức → giá vốn = Σ(SL NL × giá TB NL) / SL thành phẩm
+            // - Sản phẩm thường       → giá vốn = giá TB xuất kho thành phẩm
+            foreach ($order->items as $item) {
+                $recipe = $recipes->get($item->product_id);
+
+                if ($recipe) {
+                    $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
+                    $totalIngCost = 0;
+
+                    foreach ($recipe->ingredients as $ingredient) {
+                        $ingInventory = Inventory::where([
+                            'product_id' => $ingredient->ingredient_id,
+                            'warehouse_id' => $item->warehouse_id,
+                            'organization_id' => $orgId,
+                        ])->first();
+
+                        $totalIngCost += (float) $ingredient->quantity * $multiplier
+                            * ($ingInventory ? (float) $ingInventory->avg_cost : 0);
+                    }
+
+                    $costPerUnit = $item->quantity > 0 ? $totalIngCost / (float) $item->quantity : 0;
+                    $item->update(['cost_price' => round($costPerUnit, 4)]);
+                } else {
+                    $inventory = Inventory::where([
+                        'product_id' => $item->product_id,
+                        'warehouse_id' => $item->warehouse_id,
+                        'organization_id' => $orgId,
+                    ])->first();
+
+                    $item->update(['cost_price' => $inventory ? (float) $inventory->avg_cost : 0]);
+                }
             }
 
             // Reload sau khi update cost_price
             $order->load('items.product');
 
-            // Xuất kho theo từng warehouse trong items
-            $itemsByWarehouse = $order->items->groupBy('warehouse_id');
+            // Sản phẩm không có công thức: xuất kho trực tiếp (SalesDelivery)
+            $nonRecipeItems = $order->items->filter(fn ($item) => ! $recipes->has($item->product_id));
+            if ($nonRecipeItems->isNotEmpty()) {
+                foreach ($nonRecipeItems->groupBy('warehouse_id') as $warehouseId => $items) {
+                    $this->inventoryTransactionService->post(
+                        type: TransactionType::SalesDelivery,
+                        warehouseId: $warehouseId,
+                        date: $order->order_date->toDateString(),
+                        reference: $order,
+                        items: $items->map(fn ($item) => [
+                            'product_id' => $item->product_id,
+                            'quantity' => -(float) $item->quantity,
+                            'unit_price' => (float) $item->cost_price,
+                        ])->all(),
+                        description: "Xuất hàng theo đơn {$order->order_number}",
+                    );
+                }
+            }
 
-            foreach ($itemsByWarehouse as $warehouseId => $items) {
-                $inventoryItems = $items->map(fn ($item) => [
-                    'product_id' => $item->product_id,
-                    'quantity' => -(float) $item->quantity,
-                    'unit_price' => (float) $item->cost_price,
-                ])->all();
+            // Sản phẩm có công thức: xuất nguyên liệu (RecipeConsumption), không trừ kho món ăn
+            if ($recipes->isNotEmpty()) {
+                $ingByWarehouse = [];
 
-                $this->inventoryTransactionService->post(
-                    type: TransactionType::SalesDelivery,
-                    warehouseId: $warehouseId,
-                    date: $order->order_date->toDateString(),
-                    reference: $order,
-                    items: $inventoryItems,
-                    description: "Xuất hàng theo đơn {$order->order_number}",
-                );
+                foreach ($order->items as $item) {
+                    $recipe = $recipes->get($item->product_id);
+                    if (! $recipe) {
+                        continue;
+                    }
+
+                    $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
+
+                    foreach ($recipe->ingredients as $ingredient) {
+                        $ingId = $ingredient->ingredient_id;
+                        $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+
+                        $ingInventory = Inventory::where([
+                            'product_id' => $ingId,
+                            'warehouse_id' => $item->warehouse_id,
+                            'organization_id' => $orgId,
+                        ])->first();
+
+                        $ingByWarehouse[$item->warehouse_id][] = [
+                            'product_id' => $ingId,
+                            'quantity' => -$ingQty,
+                            'unit_price' => $ingInventory ? (float) $ingInventory->avg_cost : 0,
+                        ];
+                    }
+                }
+
+                foreach ($ingByWarehouse as $warehouseId => $ingItems) {
+                    $this->inventoryTransactionService->post(
+                        type: TransactionType::RecipeConsumption,
+                        warehouseId: $warehouseId,
+                        date: $order->order_date->toDateString(),
+                        reference: $order,
+                        items: $ingItems,
+                        description: "Xuất NL theo công thức - {$order->order_number}",
+                    );
+                }
             }
 
             $totalCost = $order->items->sum(fn ($item) => $item->quantity * $item->cost_price);
@@ -254,20 +326,63 @@ class SalesOrderService
         $orgId = app('orgId');
         $errors = [];
 
-        foreach ($order->items as $item) {
+        $productIds = $order->items->pluck('product_id')->unique()->all();
+        $recipes = Recipe::with('ingredients.ingredient:id,name')
+            ->whereIn('product_id', $productIds)
+            ->get()
+            ->keyBy('product_id');
+
+        // Sản phẩm không có công thức: kiểm tra tồn kho trực tiếp
+        foreach ($order->items->filter(fn ($item) => ! $recipes->has($item->product_id)) as $item) {
             $inventory = Inventory::where([
                 'product_id' => $item->product_id,
                 'warehouse_id' => $item->warehouse_id,
                 'organization_id' => $orgId,
             ])->lockForUpdate()->first();
 
-            // Tại thời điểm confirm, reservation của đơn này đã được tính vào reserved_quantity.
-            // Kiểm tra tồn kho thực tế (quantity) phải đủ để xuất.
             $physical = $inventory ? (float) $inventory->quantity : 0;
 
             if ($physical < (float) $item->quantity) {
                 $productName = $item->product->name ?? "SP #{$item->product_id}";
                 $errors[] = "Sản phẩm \"{$productName}\" không đủ tồn kho (cần {$item->quantity}, hiện có {$physical}).";
+            }
+        }
+
+        // Kiểm tra nguyên liệu theo công thức
+
+        if ($recipes->isNotEmpty()) {
+            // Tổng hợp yêu cầu nguyên liệu theo (warehouseId, ingredientId)
+            $ingRequirements = [];
+
+            foreach ($order->items as $item) {
+                $recipe = $recipes->get($item->product_id);
+                if (! $recipe) {
+                    continue;
+                }
+
+                $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
+
+                foreach ($recipe->ingredients as $ingredient) {
+                    $key = "{$item->warehouse_id}:{$ingredient->ingredient_id}";
+                    $ingRequirements[$key]['warehouse_id'] = $item->warehouse_id;
+                    $ingRequirements[$key]['ingredient_id'] = $ingredient->ingredient_id;
+                    $ingRequirements[$key]['name'] = $ingredient->ingredient?->name ?? "NL #{$ingredient->ingredient_id}";
+                    $ingRequirements[$key]['qty'] = ($ingRequirements[$key]['qty'] ?? 0) + ((float) $ingredient->quantity * $multiplier);
+                }
+            }
+
+            foreach ($ingRequirements as $req) {
+                $inventory = Inventory::where([
+                    'product_id' => $req['ingredient_id'],
+                    'warehouse_id' => $req['warehouse_id'],
+                    'organization_id' => $orgId,
+                ])->lockForUpdate()->first();
+
+                $physical = $inventory ? (float) $inventory->quantity : 0;
+
+                if ($physical < $req['qty']) {
+                    $errors[] = "Nguyên liệu \"{$req['name']}\" không đủ tồn kho (cần ".round($req['qty'], 4).", hiện có {$physical}).";
+                }
             }
         }
 
@@ -280,12 +395,32 @@ class SalesOrderService
     {
         $orgId = app('orgId');
 
+        $productIds = $order->items->pluck('product_id')->unique()->all();
+        $recipes = Recipe::with('ingredients')
+            ->whereIn('product_id', $productIds)
+            ->get()
+            ->keyBy('product_id');
+
         foreach ($order->items as $item) {
-            Inventory::where([
-                'product_id' => $item->product_id,
-                'warehouse_id' => $item->warehouse_id,
-                'organization_id' => $orgId,
-            ])->decrement('reserved_quantity', (float) $item->quantity);
+            $recipe = $recipes->get($item->product_id);
+
+            if ($recipe) {
+                $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
+                foreach ($recipe->ingredients as $ingredient) {
+                    $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                    Inventory::where([
+                        'product_id' => $ingredient->ingredient_id,
+                        'warehouse_id' => $item->warehouse_id,
+                        'organization_id' => $orgId,
+                    ])->decrement('reserved_quantity', $ingQty);
+                }
+            } else {
+                Inventory::where([
+                    'product_id' => $item->product_id,
+                    'warehouse_id' => $item->warehouse_id,
+                    'organization_id' => $orgId,
+                ])->decrement('reserved_quantity', (float) $item->quantity);
+            }
         }
     }
 }

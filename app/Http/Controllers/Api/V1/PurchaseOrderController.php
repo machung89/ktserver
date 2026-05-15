@@ -201,8 +201,8 @@ class PurchaseOrderController extends Controller
     private function generateOrderNumber(): string
     {
         $last = PurchaseOrder::orderByDesc('id')->lockForUpdate()->first();
-        $seq = $last ? ((int) substr($last->order_number, 3)) + 1 : 1;
+        $seq = $last ? ((int) substr($last->order_number, 2)) + 1 : 1;
 
-        return 'PO-'.str_pad($seq, 6, '0', STR_PAD_LEFT);
+        return 'NH'.str_pad($seq, 6, '0', STR_PAD_LEFT);
     }
 }

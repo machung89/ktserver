@@ -6,11 +6,14 @@ use App\Enums\PaymentType;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PaymentResource;
+use App\Models\JournalEntry;
 use App\Models\Payment;
+use App\Models\Tour;
 use App\Services\PaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -22,11 +25,12 @@ class PaymentController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $payments = Payment::with(['company', 'account', 'expenseAccount'])
+        $payments = Payment::with(['company.bank', 'account', 'expenseAccount'])
             ->when($request->type, fn ($q, $v) => $q->where('type', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
+            ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->latest()
-            ->paginate(20);
+            ->paginate($request->filled('per_page') ? (int) $request->per_page : 20);
 
         return PaymentResource::collection($payments);
     }
@@ -102,6 +106,40 @@ class PaymentController extends Controller
 
     public function show(Payment $payment): PaymentResource
     {
-        return new PaymentResource($payment->load(['company', 'account']));
+        return new PaymentResource($payment->load(['company.bank', 'account']));
+    }
+
+    public function approve(Request $request, Payment $payment): JsonResponse
+    {
+        $validated = $request->validate([
+            'account_id' => ['required', 'exists:accounts,id'],
+        ]);
+
+        $payment = $this->paymentService->approve($payment, (int) $validated['account_id']);
+
+        return (new PaymentResource($payment))->response();
+    }
+
+    public function destroy(Payment $payment): JsonResponse
+    {
+        DB::transaction(function () use ($payment) {
+            JournalEntry::where('reference_type', Payment::class)
+                ->where('reference_id', $payment->id)
+                ->each(function ($entry) {
+                    $entry->lines()->delete();
+                    $entry->delete();
+                });
+
+            // Hoàn paid_amount nếu phiếu thu liên kết với tour
+            if ($payment->reference_type === Tour::class && $payment->reference_id) {
+                Tour::withoutGlobalScopes()
+                    ->where('id', $payment->reference_id)
+                    ->decrement('paid_amount', (float) $payment->amount);
+            }
+
+            $payment->delete();
+        });
+
+        return response()->json(null, 204);
     }
 }

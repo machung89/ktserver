@@ -8,9 +8,10 @@ use Database\Factories\CompanyFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['name', 'type', 'tax_code', 'phone', 'email', 'address', 'city', 'representative', 'is_active', 'organization_id'])]
+#[Fillable(['name', 'type', 'tax_code', 'phone', 'email', 'address', 'city', 'ward', 'representative', 'is_active', 'organization_id', 'user_id', 'bank_id', 'bank_account_name', 'bank_account_number'])]
 class Company extends Model
 {
     /** @use HasFactory<CompanyFactory> */
@@ -27,6 +28,16 @@ class Company extends Model
             'type' => CompanyType::class,
             'is_active' => 'boolean',
         ];
+    }
+
+    public function assignedUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+
+    public function bank(): BelongsTo
+    {
+        return $this->belongsTo(Bank::class);
     }
 
     public function purchaseOrders(): HasMany

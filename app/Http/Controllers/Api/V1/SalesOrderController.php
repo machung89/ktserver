@@ -5,11 +5,15 @@ namespace App\Http\Controllers\Api\V1;
 use App\Enums\OrderStatus;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Api\V1\SalesOrderItemResource;
 use App\Http\Resources\Api\V1\SalesOrderResource;
 use App\Models\Inventory;
 use App\Models\Organization;
 use App\Models\Product;
+use App\Models\Recipe;
+use App\Models\RestaurantTable;
 use App\Models\SalesOrder;
+use App\Models\SalesOrderItem;
 use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\SalesOrderService;
@@ -32,7 +36,7 @@ class SalesOrderController extends Controller
         $user = Auth::user();
         $canViewAll = $user->hasPermission('sales.view_all');
 
-        $orders = SalesOrder::with(['company', 'createdBy'])
+        $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable'])
             ->when(! $canViewAll, fn ($q) => $q->where('created_by', Auth::id()))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
@@ -41,6 +45,14 @@ class SalesOrderController extends Controller
                     $q->where('order_number', 'like', "%{$v}%")
                         ->orWhereHas('company', fn ($cq) => $cq->where('name', 'like', "%{$v}%"));
                 });
+            })
+            ->when($request->date_from, fn ($q, $v) => $q->whereDate('order_date', '>=', $v))
+            ->when($request->date_to, fn ($q, $v) => $q->whereDate('order_date', '<=', $v))
+            ->when($request->filled('payment_status'), function ($q) use ($request) {
+                $statuses = array_filter(explode(',', $request->payment_status));
+                if ($statuses) {
+                    $q->whereIn('payment_status', $statuses);
+                }
             })
             ->latest()
             ->paginate($request->filled('per_page') ? (int) $request->per_page : 20);
@@ -73,7 +85,8 @@ class SalesOrderController extends Controller
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'company_id' => ['required', 'exists:companies,id'],
+            'company_id' => ['nullable', 'exists:companies,id'],
+            'restaurant_table_id' => ['nullable', 'exists:restaurant_tables,id'],
             'order_date' => ['required', 'date'],
             'notes' => ['nullable', 'string'],
             'discount_type' => ['nullable', 'in:percent,fixed'],
@@ -97,8 +110,18 @@ class SalesOrderController extends Controller
 
         try {
             $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, &$stockErrors) {
+                $itemProductIds = array_unique(array_column($validated['items'], 'product_id'));
+                $recipes = Recipe::with('ingredients')
+                    ->whereIn('product_id', $itemProductIds)
+                    ->get()
+                    ->keyBy('product_id');
+
                 if (! $allowNegativeStock) {
+                    // Sản phẩm không có công thức: kiểm tra tồn kho trực tiếp
                     foreach ($validated['items'] as $item) {
+                        if ($recipes->has($item['product_id'])) {
+                            continue;
+                        }
                         $inventory = Inventory::where([
                             'product_id' => $item['product_id'],
                             'warehouse_id' => $item['warehouse_id'],
@@ -124,6 +147,45 @@ class SalesOrderController extends Controller
                         }
                     }
 
+                    // Sản phẩm có công thức: kiểm tra nguyên liệu (tổng hợp theo warehouse + ingredient)
+                    $ingRequirements = [];
+                    foreach ($validated['items'] as $item) {
+                        $recipe = $recipes->get($item['product_id']);
+                        if (! $recipe) {
+                            continue;
+                        }
+                        $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
+                        foreach ($recipe->ingredients as $ingredient) {
+                            $key = "{$item['warehouse_id']}:{$ingredient->ingredient_id}";
+                            $ingRequirements[$key]['warehouse_id'] = $item['warehouse_id'];
+                            $ingRequirements[$key]['ingredient_id'] = $ingredient->ingredient_id;
+                            $ingRequirements[$key]['qty'] = ($ingRequirements[$key]['qty'] ?? 0) + ((float) $ingredient->quantity * $multiplier);
+                        }
+                    }
+                    foreach ($ingRequirements as $req) {
+                        $inventory = Inventory::where([
+                            'product_id' => $req['ingredient_id'],
+                            'warehouse_id' => $req['warehouse_id'],
+                            'organization_id' => $orgId,
+                        ])->lockForUpdate()->first();
+
+                        $available = $inventory ? (float) $inventory->available_quantity : 0;
+                        if ($req['qty'] > $available) {
+                            $ingProduct = Product::find($req['ingredient_id']);
+                            $warehouse = Warehouse::find($req['warehouse_id']);
+                            $stockErrors[] = [
+                                'product_id' => $req['ingredient_id'],
+                                'warehouse_id' => $req['warehouse_id'],
+                                'product_name' => $ingProduct?->name ?? '',
+                                'product_code' => $ingProduct?->code ?? '',
+                                'warehouse_name' => $warehouse?->name ?? '',
+                                'requested' => round($req['qty'], 4),
+                                'available' => $available,
+                                'shortage' => round($req['qty'] - $available, 4),
+                            ];
+                        }
+                    }
+
                     if (! empty($stockErrors)) {
                         throw new \RuntimeException('__stock_insufficient__');
                     }
@@ -133,9 +195,11 @@ class SalesOrderController extends Controller
                     'order_number' => $this->generateOrderNumber(),
                     'status' => OrderStatus::Draft,
                     'organization_id' => $orgId,
-                    'company_id' => $validated['company_id'],
+                    'company_id' => $validated['company_id'] ?? null,
+                    'restaurant_table_id' => $validated['restaurant_table_id'] ?? null,
                     'order_date' => $validated['order_date'],
                     'notes' => $validated['notes'] ?? null,
+                    'promotion_id' => $validated['promotion_id'] ?? null,
                     'discount_type' => $validated['discount_type'] ?? null,
                     'discount_value' => $validated['discount_value'] ?? 0,
                     'subtotal' => 0,
@@ -144,6 +208,11 @@ class SalesOrderController extends Controller
                     'total_amount' => 0,
                     'created_by' => Auth::id(),
                 ]);
+
+                if (! empty($validated['restaurant_table_id'])) {
+                    RestaurantTable::where('id', $validated['restaurant_table_id'])
+                        ->update(['status' => 'occupied']);
+                }
 
                 $subtotal = 0;
                 $taxAmount = 0;
@@ -174,11 +243,25 @@ class SalesOrderController extends Controller
                         'amount' => $amount,
                     ]);
 
-                    $inventory = Inventory::lockForUpdate()->firstOrCreate(
-                        ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                        ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                    );
-                    $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                    $recipe = $recipes->get($item['product_id']);
+                    if ($recipe) {
+                        // Đặt trước nguyên liệu theo công thức
+                        $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
+                        foreach ($recipe->ingredients as $ingredient) {
+                            $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                            $inv = Inventory::lockForUpdate()->firstOrCreate(
+                                ['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                                ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                            );
+                            $inv->increment('reserved_quantity', $ingQty);
+                        }
+                    } else {
+                        $inventory = Inventory::lockForUpdate()->firstOrCreate(
+                            ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                            ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                        );
+                        $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                    }
                 }
 
                 $orderDiscountType = $validated['discount_type'] ?? null;
@@ -208,7 +291,7 @@ class SalesOrderController extends Controller
             throw $e;
         }
 
-        return (new SalesOrderResource($order->load(['company', 'createdBy', 'items.product', 'items.warehouse'])))
+        return (new SalesOrderResource($order->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse'])))
             ->response()->setStatusCode(201);
     }
 
@@ -220,7 +303,7 @@ class SalesOrderController extends Controller
             abort(403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
-        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'items.product', 'items.warehouse']));
+        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource
@@ -230,7 +313,8 @@ class SalesOrderController extends Controller
         }
 
         $validated = $request->validate([
-            'company_id' => ['sometimes', 'exists:companies,id'],
+            'company_id' => ['sometimes', 'nullable', 'exists:companies,id'],
+            'restaurant_table_id' => ['sometimes', 'nullable', 'exists:restaurant_tables,id'],
             'order_date' => ['sometimes', 'date'],
             'notes' => ['nullable', 'string'],
             'discount_type' => ['nullable', 'in:percent,fixed'],
@@ -245,25 +329,127 @@ class SalesOrderController extends Controller
             'items.*.discount_type' => ['nullable', 'in:percent,fixed'],
             'items.*.discount_value' => ['nullable', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'items.*.is_served' => ['nullable', 'boolean'],
         ]);
 
-        $headerData = collect($validated)->except('items')->toArray();
+        $orgId = $this->orgId();
 
-        if (isset($headerData['discount_type']) || isset($headerData['discount_value'])) {
-            $discountType = $headerData['discount_type'] ?? $salesOrder->discount_type;
-            $discountValue = (float) ($headerData['discount_value'] ?? $salesOrder->discount_value ?? 0);
-            $subtotal = (float) $salesOrder->subtotal;
-            $headerData['discount_amount'] = match ($discountType) {
-                'percent' => $subtotal * $discountValue / 100,
-                'fixed' => min($discountValue, $subtotal),
+        DB::transaction(function () use ($salesOrder, $validated, $orgId) {
+            $headerData = collect($validated)->except('items')->toArray();
+            $salesOrder->update($headerData);
+
+            if (! isset($validated['items'])) {
+                return;
+            }
+
+            // Load existing items for reservation release
+            $salesOrder->load('items');
+            $existingProductIds = $salesOrder->items->pluck('product_id')->unique()->all();
+            $existingRecipes = Recipe::with('ingredients')
+                ->whereIn('product_id', $existingProductIds)
+                ->get()
+                ->keyBy('product_id');
+
+            // Release reservations for all existing items
+            foreach ($salesOrder->items as $item) {
+                $recipe = $existingRecipes->get($item->product_id);
+                if ($recipe) {
+                    $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
+                    foreach ($recipe->ingredients as $ingredient) {
+                        $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                        Inventory::where([
+                            'product_id' => $ingredient->ingredient_id,
+                            'warehouse_id' => $item->warehouse_id,
+                            'organization_id' => $orgId,
+                        ])->decrement('reserved_quantity', $ingQty);
+                    }
+                } else {
+                    Inventory::where([
+                        'product_id' => $item->product_id,
+                        'warehouse_id' => $item->warehouse_id,
+                        'organization_id' => $orgId,
+                    ])->decrement('reserved_quantity', (float) $item->quantity);
+                }
+            }
+
+            // Delete old items
+            $salesOrder->items()->delete();
+
+            // Load recipes for new items
+            $newProductIds = array_unique(array_column($validated['items'], 'product_id'));
+            $newRecipes = Recipe::with('ingredients')
+                ->whereIn('product_id', $newProductIds)
+                ->get()
+                ->keyBy('product_id');
+
+            // Recreate items and reservations
+            $subtotal = 0;
+            $taxAmount = 0;
+
+            foreach ($validated['items'] as $item) {
+                $base = (float) $item['quantity'] * (float) $item['unit_price'];
+                $discountType = $item['discount_type'] ?? null;
+                $discountValue = (float) ($item['discount_value'] ?? 0);
+                $discountAmount = match ($discountType) {
+                    'percent' => $base * $discountValue / 100,
+                    'fixed' => min($discountValue, $base),
+                    default => 0,
+                };
+                $amount = $base - $discountAmount;
+                $taxRate = (float) ($item['tax_rate'] ?? 0);
+                $subtotal += $amount;
+                $taxAmount += $amount * $taxRate / 100;
+
+                $salesOrder->items()->create([
+                    'product_id' => $item['product_id'],
+                    'warehouse_id' => $item['warehouse_id'],
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $item['unit_price'],
+                    'discount_type' => $discountType,
+                    'discount_value' => $discountValue,
+                    'cost_price' => $item['cost_price'] ?? 0,
+                    'tax_rate' => $taxRate,
+                    'amount' => $amount,
+                    'is_served' => $item['is_served'] ?? false,
+                ]);
+
+                $recipe = $newRecipes->get($item['product_id']);
+                if ($recipe) {
+                    $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
+                    foreach ($recipe->ingredients as $ingredient) {
+                        $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                        $inv = Inventory::lockForUpdate()->firstOrCreate(
+                            ['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                            ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                        );
+                        $inv->increment('reserved_quantity', $ingQty);
+                    }
+                } else {
+                    $inv = Inventory::lockForUpdate()->firstOrCreate(
+                        ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                        ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                    );
+                    $inv->increment('reserved_quantity', (float) $item['quantity']);
+                }
+            }
+
+            $orderDiscountType = $salesOrder->discount_type;
+            $orderDiscountValue = (float) ($salesOrder->discount_value ?? 0);
+            $orderDiscountAmount = match ($orderDiscountType) {
+                'percent' => $subtotal * $orderDiscountValue / 100,
+                'fixed' => min($orderDiscountValue, $subtotal),
                 default => 0,
             };
-            $headerData['total_amount'] = $subtotal + (float) $salesOrder->tax_amount - $headerData['discount_amount'];
-        }
 
-        $salesOrder->update($headerData);
+            $salesOrder->update([
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'discount_amount' => $orderDiscountAmount,
+                'total_amount' => $subtotal + $taxAmount - $orderDiscountAmount,
+            ]);
+        });
 
-        return new SalesOrderResource($salesOrder->load(['company', 'items.product']));
+        return new SalesOrderResource($salesOrder->fresh()->load(['company', 'restaurantTable', 'items.product', 'items.warehouse']));
     }
 
     public function confirm(SalesOrder $salesOrder): SalesOrderResource
@@ -293,6 +479,7 @@ class SalesOrderController extends Controller
         }
 
         $salesOrder->update(['status' => OrderStatus::Completed]);
+        $this->releaseTableIfIdle($salesOrder);
 
         return new SalesOrderResource($salesOrder->fresh());
     }
@@ -317,7 +504,27 @@ class SalesOrderController extends Controller
             throw ValidationException::withMessages(['status' => ['Không thể hủy đơn đã hoàn thành.']]);
         }
 
-        return new SalesOrderResource($this->salesOrderService->cancel($salesOrder));
+        $result = $this->salesOrderService->cancel($salesOrder);
+        $this->releaseTableIfIdle($salesOrder);
+
+        return new SalesOrderResource($result);
+    }
+
+    private function releaseTableIfIdle(SalesOrder $order): void
+    {
+        if (! $order->restaurant_table_id) {
+            return;
+        }
+
+        $hasActive = SalesOrder::where('restaurant_table_id', $order->restaurant_table_id)
+            ->where('id', '!=', $order->id)
+            ->whereNotIn('status', [OrderStatus::Completed, OrderStatus::Cancelled])
+            ->exists();
+
+        if (! $hasActive) {
+            RestaurantTable::where('id', $order->restaurant_table_id)
+                ->update(['status' => 'available']);
+        }
     }
 
     public function bulkConfirm(Request $request): JsonResponse
@@ -381,8 +588,17 @@ class SalesOrderController extends Controller
 
             try {
                 DB::transaction(function () use ($orderData, $orgId, $allowNegativeStock) {
+                    $itemProductIds = array_unique(array_column($orderData['items'], 'product_id'));
+                    $recipes = Recipe::with('ingredients')
+                        ->whereIn('product_id', $itemProductIds)
+                        ->get()
+                        ->keyBy('product_id');
+
                     if (! $allowNegativeStock) {
                         foreach ($orderData['items'] as $item) {
+                            if ($recipes->has($item['product_id'])) {
+                                continue;
+                            }
                             $inventory = Inventory::where([
                                 'product_id' => $item['product_id'],
                                 'warehouse_id' => $item['warehouse_id'],
@@ -393,6 +609,34 @@ class SalesOrderController extends Controller
                             if ((float) $item['quantity'] > $available) {
                                 $product = Product::find($item['product_id']);
                                 throw new \RuntimeException("Sản phẩm \"{$product?->name}\" không đủ tồn kho (yêu cầu: {$item['quantity']}, khả dụng: {$available})");
+                            }
+                        }
+
+                        $ingRequirements = [];
+                        foreach ($orderData['items'] as $item) {
+                            $recipe = $recipes->get($item['product_id']);
+                            if (! $recipe) {
+                                continue;
+                            }
+                            $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
+                            foreach ($recipe->ingredients as $ingredient) {
+                                $key = "{$item['warehouse_id']}:{$ingredient->ingredient_id}";
+                                $ingRequirements[$key]['warehouse_id'] = $item['warehouse_id'];
+                                $ingRequirements[$key]['ingredient_id'] = $ingredient->ingredient_id;
+                                $ingRequirements[$key]['qty'] = ($ingRequirements[$key]['qty'] ?? 0) + ((float) $ingredient->quantity * $multiplier);
+                            }
+                        }
+                        foreach ($ingRequirements as $req) {
+                            $inventory = Inventory::where([
+                                'product_id' => $req['ingredient_id'],
+                                'warehouse_id' => $req['warehouse_id'],
+                                'organization_id' => $orgId,
+                            ])->lockForUpdate()->first();
+
+                            $available = $inventory ? (float) $inventory->available_quantity : 0;
+                            if ($req['qty'] > $available) {
+                                $ingProduct = Product::find($req['ingredient_id']);
+                                throw new \RuntimeException("Nguyên liệu \"{$ingProduct?->name}\" không đủ tồn kho (yêu cầu: ".round($req['qty'], 4).", khả dụng: {$available})");
                             }
                         }
                     }
@@ -439,11 +683,24 @@ class SalesOrderController extends Controller
                             'amount' => $amount,
                         ]);
 
-                        $inventory = Inventory::lockForUpdate()->firstOrCreate(
-                            ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                            ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                        );
-                        $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                        $recipe = $recipes->get($item['product_id']);
+                        if ($recipe) {
+                            $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
+                            foreach ($recipe->ingredients as $ingredient) {
+                                $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                                $inv = Inventory::lockForUpdate()->firstOrCreate(
+                                    ['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                                    ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                                );
+                                $inv->increment('reserved_quantity', $ingQty);
+                            }
+                        } else {
+                            $inventory = Inventory::lockForUpdate()->firstOrCreate(
+                                ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
+                                ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
+                            );
+                            $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                        }
                     }
 
                     $order->update([
@@ -461,11 +718,24 @@ class SalesOrderController extends Controller
         return response()->json(['success' => $success, 'failed' => count($errors), 'errors' => $errors]);
     }
 
+    public function updateItem(SalesOrder $salesOrder, SalesOrderItem $salesOrderItem): SalesOrderItemResource
+    {
+        abort_if($salesOrderItem->sales_order_id !== $salesOrder->id, 404);
+
+        $validated = request()->validate([
+            'is_served' => ['required', 'boolean'],
+        ]);
+
+        $salesOrderItem->update($validated);
+
+        return new SalesOrderItemResource($salesOrderItem->load(['product', 'warehouse']));
+    }
+
     private function generateOrderNumber(): string
     {
         $last = SalesOrder::orderByDesc('id')->lockForUpdate()->first();
-        $seq = $last ? ((int) substr($last->order_number, 3)) + 1 : 1;
+        $seq = $last ? ((int) substr($last->order_number, 2)) + 1 : 1;
 
-        return 'DH-'.str_pad($seq, 6, '0', STR_PAD_LEFT);
+        return 'BH'.str_pad($seq, 6, '0', STR_PAD_LEFT);
     }
 }

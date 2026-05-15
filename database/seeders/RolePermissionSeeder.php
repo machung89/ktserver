@@ -47,12 +47,14 @@ class RolePermissionSeeder extends Seeder
                 ['sales.view_all', 'Xem tất cả đơn bán'],
                 ['sales.create', 'Tạo đơn bán'],
                 ['sales.edit', 'Sửa đơn bán'],
+                ['sales.edit_price', 'Sửa đơn giá trong đơn bán'],
                 ['sales.confirm', 'Xác nhận đơn bán'],
                 ['sales.cancel', 'Hủy đơn bán'],
             ],
             'payments' => [
                 ['payments.view', 'Xem thu chi'],
                 ['payments.create', 'Tạo phiếu thu chi'],
+                ['payments.delete', 'Xóa phiếu thu chi'],
             ],
             'accounts' => [
                 ['accounts.view', 'Xem tài khoản kế toán'],
@@ -82,6 +84,14 @@ class RolePermissionSeeder extends Seeder
                 ['roles.create', 'Thêm vai trò'],
                 ['roles.edit', 'Sửa vai trò'],
                 ['roles.delete', 'Xóa vai trò'],
+            ],
+            'tours' => [
+                ['tours.view', 'Xem tour du lịch'],
+                ['tours.create', 'Tạo / sửa tour'],
+                ['tours.confirm', 'Xác nhận / hoàn thành tour'],
+                ['tours.cancel', 'Hủy tour'],
+                ['tours.payment_request', 'Lên lệnh thanh toán dịch vụ tour'],
+                ['tours.payment_approve', 'Duyệt phiếu thanh toán dịch vụ tour'],
             ],
             'settings' => [
                 ['settings.view', 'Xem cài đặt'],

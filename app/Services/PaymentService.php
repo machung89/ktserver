@@ -6,6 +6,7 @@ use App\Enums\PaymentType;
 use App\Models\Payment;
 use App\Models\PurchaseOrder;
 use App\Models\SalesOrder;
+use App\Models\TourPaymentRequest;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -88,6 +89,101 @@ class PaymentService
         });
     }
 
+    /**
+     * Tạo phiếu chi ở trạng thái nháp — chưa sinh bút toán, chờ giám đốc duyệt.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    public function createDraft(array $data): Payment
+    {
+        return DB::transaction(function () use ($data) {
+            return Payment::create([
+                'payment_number' => $this->generatePaymentNumber($data['type']),
+                ...$data,
+                'status' => 'draft',
+            ]);
+        });
+    }
+
+    /**
+     * Giám đốc duyệt phiếu chi nháp: chọn TK thanh toán → sinh bút toán → cập nhật paid_amount (tour).
+     */
+    public function approve(Payment $payment, int $accountId): Payment
+    {
+        return DB::transaction(function () use ($payment, $accountId) {
+            $payment = Payment::lockForUpdate()->find($payment->id);
+
+            if ($payment->status !== 'draft') {
+                throw ValidationException::withMessages(['status' => ['Chỉ có thể duyệt phiếu ở trạng thái nháp.']]);
+            }
+
+            $payment->update([
+                'status' => 'approved',
+                'account_id' => $accountId,
+            ]);
+
+            $payment->load(['account', 'expenseAccount']);
+
+            $desc = $payment->description ?? $payment->payment_number;
+            $amount = (float) $payment->amount;
+            $lines = $this->buildLines($payment, $payment->account, $desc, $amount);
+
+            if ($lines !== null) {
+                $this->journalEntryService->create(
+                    description: $desc,
+                    entryDate: $payment->payment_date->toDateString(),
+                    reference: $payment,
+                    lines: $lines,
+                );
+            }
+
+            // Nếu phiếu chi liên kết với lệnh thanh toán tour → cập nhật paid_amount dịch vụ
+            if ($payment->reference_type === TourPaymentRequest::class) {
+                $req = TourPaymentRequest::with('service')->find($payment->reference_id);
+                if ($req?->service) {
+                    $req->service->increment('paid_amount', $amount);
+                }
+            }
+
+            return $payment->fresh(['company', 'account', 'expenseAccount']);
+        });
+    }
+
+    public function availableSupplierAdvance(int $companyId, int $orgId): float
+    {
+        $paid = Payment::where('company_id', $companyId)
+            ->where('organization_id', $orgId)
+            ->where('type', PaymentType::Payment)
+            ->where('is_advance', true)
+            ->where('status', 'approved')
+            ->whereNull('reference_id')
+            ->sum('amount');
+
+        $applied = Payment::where('company_id', $companyId)
+            ->where('organization_id', $orgId)
+            ->where('type', PaymentType::Payment)
+            ->where('is_advance', true)
+            ->whereNotNull('reference_id')
+            ->sum('amount');
+
+        return max(0, (float) $paid - (float) $applied);
+    }
+
+    private function availableSupplierAdvanceLocked(int $companyId, int $orgId): float
+    {
+        $base = Payment::where('company_id', $companyId)
+            ->where('organization_id', $orgId)
+            ->where('type', PaymentType::Payment)
+            ->where('is_advance', true)
+            ->where('status', 'approved')
+            ->lockForUpdate();
+
+        $paid = (clone $base)->whereNull('reference_id')->sum('amount');
+        $applied = (clone $base)->whereNotNull('reference_id')->sum('amount');
+
+        return max(0, (float) $paid - (float) $applied);
+    }
+
     public function availableAdvance(int $companyId, int $orgId): float
     {
         $received = Payment::where('company_id', $companyId)
@@ -160,8 +256,8 @@ class PaymentService
     {
         $prefix = $type === 'receipt' ? 'PT' : 'PC';
         $last = Payment::where('type', $type)->orderByDesc('id')->lockForUpdate()->first();
-        $seq = $last ? ((int) substr($last->payment_number, 3)) + 1 : 1;
+        $seq = $last ? ((int) substr($last->payment_number, 2)) + 1 : 1;
 
-        return $prefix.'-'.str_pad($seq, 6, '0', STR_PAD_LEFT);
+        return $prefix.str_pad($seq, 6, '0', STR_PAD_LEFT);
     }
 }

@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['sales_order_id', 'product_id', 'warehouse_id', 'quantity', 'unit_price', 'discount_type', 'discount_value', 'cost_price', 'tax_rate', 'amount', 'is_return', 'return_date', 'return_note'])]
+#[Fillable(['sales_order_id', 'product_id', 'warehouse_id', 'quantity', 'is_served', 'unit_price', 'discount_type', 'discount_value', 'cost_price', 'tax_rate', 'amount', 'is_return', 'return_date', 'return_note'])]
 class SalesOrderItem extends Model
 {
     use HasFactory;
@@ -16,6 +16,7 @@ class SalesOrderItem extends Model
     {
         return [
             'quantity' => 'decimal:3',
+            'is_served' => 'boolean',
             'unit_price' => 'decimal:2',
             'discount_value' => 'decimal:2',
             'cost_price' => 'decimal:2',

@@ -160,6 +160,16 @@ class ReportController extends Controller
 
     public function sales(Request $request): JsonResponse
     {
+        return match ($request->get('group_by', 'product')) {
+            'employee' => $this->salesByEmployee($request),
+            'date' => $this->salesGroupedByDate($request),
+            'category' => $this->salesGroupedByCategory($request),
+            default => $this->salesGroupedByProduct($request),
+        };
+    }
+
+    private function salesGroupedByProduct(Request $request): JsonResponse
+    {
         $items = SalesOrderItem::with(['product.category.parent', 'salesOrder'])
             ->whereHas('salesOrder', fn ($q) => $q->whereIn('status', ['confirmed', 'shipping', 'completed'])
                 ->when($request->from, fn ($q2, $v) => $q2->whereDate('order_date', '>=', $v))
@@ -201,6 +211,98 @@ class ReportController extends Controller
             'total_revenue' => round($grouped->sum('revenue'), 2),
             'total_cost' => round($grouped->sum('cost'), 2),
             'gross_profit' => round($grouped->sum('profit'), 2),
+        ]);
+    }
+
+    private function salesGroupedByDate(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+
+        $rows = DB::table('sales_orders as so')
+            ->leftJoin('sales_order_items as soi', function ($j) {
+                $j->on('soi.sales_order_id', '=', 'so.id')->where('soi.is_return', false);
+            })
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->groupBy(DB::raw('DATE(so.order_date)'))
+            ->select([
+                DB::raw('DATE(so.order_date) as date'),
+                DB::raw('COUNT(DISTINCT so.id) as order_count'),
+                DB::raw('SUM(so.total_amount) as revenue'),
+                DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+            ])
+            ->orderBy(DB::raw('DATE(so.order_date)'))
+            ->get()
+            ->map(function ($r) {
+                $revenue = round((float) $r->revenue, 2);
+                $cost = round((float) $r->cost, 2);
+                $profit = round($revenue - $cost, 2);
+
+                return [
+                    'date' => $r->date,
+                    'order_count' => (int) $r->order_count,
+                    'revenue' => $revenue,
+                    'cost' => $cost,
+                    'profit' => $profit,
+                    'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                ];
+            });
+
+        return response()->json([
+            'data' => $rows,
+            'total_revenue' => round($rows->sum('revenue'), 2),
+            'total_cost' => round($rows->sum('cost'), 2),
+            'gross_profit' => round($rows->sum('profit'), 2),
+        ]);
+    }
+
+    private function salesGroupedByCategory(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+
+        $rows = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->join('products as p', 'p.id', '=', 'soi.product_id')
+            ->leftJoin('product_categories as pc', 'pc.id', '=', 'p.category_id')
+            ->leftJoin('product_categories as parent_pc', 'parent_pc.id', '=', 'pc.parent_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('soi.is_return', false)
+            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->groupBy('pc.id', 'pc.name', 'parent_pc.name')
+            ->select([
+                DB::raw("COALESCE(CASE WHEN parent_pc.name IS NOT NULL THEN CONCAT(parent_pc.name, ' › ', pc.name) ELSE pc.name END, '(Chưa phân loại)') as category_name"),
+                DB::raw('SUM(soi.quantity) as quantity'),
+                DB::raw('COUNT(DISTINCT so.id) as order_count'),
+                DB::raw('SUM(soi.amount) as revenue'),
+                DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+            ])
+            ->orderByDesc(DB::raw('SUM(soi.amount)'))
+            ->get()
+            ->map(function ($r) {
+                $revenue = round((float) $r->revenue, 2);
+                $cost = round((float) $r->cost, 2);
+                $profit = round($revenue - $cost, 2);
+
+                return [
+                    'category_name' => $r->category_name,
+                    'quantity' => round((float) $r->quantity, 3),
+                    'order_count' => (int) $r->order_count,
+                    'revenue' => $revenue,
+                    'cost' => $cost,
+                    'profit' => $profit,
+                    'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                ];
+            });
+
+        return response()->json([
+            'data' => $rows,
+            'total_revenue' => round($rows->sum('revenue'), 2),
+            'total_cost' => round($rows->sum('cost'), 2),
+            'gross_profit' => round($rows->sum('profit'), 2),
         ]);
     }
 

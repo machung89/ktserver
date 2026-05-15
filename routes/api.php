@@ -2,7 +2,9 @@
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ProfileController;
+use App\Http\Controllers\Api\Public\TableOrderController;
 use App\Http\Controllers\Api\V1\AccountController;
+use App\Http\Controllers\Api\V1\BankController;
 use App\Http\Controllers\Api\V1\CompanyController;
 use App\Http\Controllers\Api\V1\EmployeeController;
 use App\Http\Controllers\Api\V1\FixedAssetController;
@@ -14,16 +16,28 @@ use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Controllers\Api\V1\ProductCategoryController;
 use App\Http\Controllers\Api\V1\ProductController;
 use App\Http\Controllers\Api\V1\PromotionController;
+use App\Http\Controllers\Api\V1\ProvinceController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
+use App\Http\Controllers\Api\V1\RecipeController;
 use App\Http\Controllers\Api\V1\ReportController;
+use App\Http\Controllers\Api\V1\RestaurantTableController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\SalesOrderController;
+use App\Http\Controllers\Api\V1\TourController;
+use App\Http\Controllers\Api\V1\TourGuideAdvanceController;
+use App\Http\Controllers\Api\V1\TourPaymentController;
 use App\Http\Controllers\Api\V1\WarehouseController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
+
+// Public table ordering (no auth)
+Route::prefix('public')->group(function () {
+    Route::get('table/{token}', [TableOrderController::class, 'info']);
+    Route::post('table/{token}/order', [TableOrderController::class, 'placeOrder']);
+});
 
 Route::middleware('auth:sanctum')->group(function (): void {
     Route::get('/user', fn (Request $request) => $request->user());
@@ -56,6 +70,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
                     'enable_sales_tax' => (bool) $org?->setting('enable_sales_tax', false),
                     'default_tax_rate' => (float) $org?->setting('default_tax_rate', 0),
                     'enable_discount' => (bool) $org?->setting('enable_discount', false),
+                    'business_mode' => $org?->setting('business_mode', 'retail'),
+                    'org_name' => $org?->name,
                 ],
             ]);
         });
@@ -69,7 +85,16 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('products', [ProductController::class, 'store'])->middleware('permission:products.create');
         Route::post('products/import', [ProductController::class, 'bulkImport'])->middleware('permission:products.create');
         Route::put('products/{product}', [ProductController::class, 'update'])->middleware('permission:products.edit');
+        Route::post('products/{product}/image', [ProductController::class, 'uploadImage'])->middleware('permission:products.edit');
+        Route::delete('products/{product}/image', [ProductController::class, 'deleteImage'])->middleware('permission:products.edit');
         Route::delete('products/{product}', [ProductController::class, 'destroy'])->middleware('permission:products.delete');
+
+        // Công thức sản phẩm
+        Route::get('recipes', [RecipeController::class, 'index'])->middleware('permission:products.view');
+        Route::get('recipes/{recipe}', [RecipeController::class, 'show'])->middleware('permission:products.view');
+        Route::post('recipes', [RecipeController::class, 'store'])->middleware('permission:products.create');
+        Route::put('recipes/{recipe}', [RecipeController::class, 'update'])->middleware('permission:products.edit');
+        Route::delete('recipes/{recipe}', [RecipeController::class, 'destroy'])->middleware('permission:products.delete');
 
         // Nhóm hàng / Ngành hàng
         Route::get('product-categories', [ProductCategoryController::class, 'index'])->middleware('permission:products.view');
@@ -78,10 +103,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::delete('product-categories/{productCategory}', [ProductCategoryController::class, 'destroy'])->middleware('permission:products.delete');
 
         // Danh mục — Kho
-        Route::middleware('permission:warehouses.view')->group(function () {
-            Route::get('warehouses', [WarehouseController::class, 'index']);
-            Route::get('warehouses/{warehouse}', [WarehouseController::class, 'show']);
-        });
+        Route::get('warehouses', [WarehouseController::class, 'index']);
+        Route::get('warehouses/{warehouse}', [WarehouseController::class, 'show']);
         Route::post('warehouses', [WarehouseController::class, 'store'])->middleware('permission:warehouses.create');
         Route::put('warehouses/{warehouse}', [WarehouseController::class, 'update'])->middleware('permission:warehouses.edit');
         Route::delete('warehouses/{warehouse}', [WarehouseController::class, 'destroy'])->middleware('permission:warehouses.delete');
@@ -128,6 +151,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::get('promotions/applicable', [PromotionController::class, 'applicable'])->middleware('permission:sales.create');
         Route::middleware('permission:promotions.view')->group(function () {
             Route::get('promotions', [PromotionController::class, 'index']);
+            Route::get('promotions/usage-stats', [PromotionController::class, 'usageStats']);
+            Route::get('promotions/{promotion}/usage', [PromotionController::class, 'usageDetail']);
             Route::get('promotions/{promotion}', [PromotionController::class, 'show']);
         });
         Route::post('promotions', [PromotionController::class, 'store'])->middleware('permission:promotions.create');
@@ -149,12 +174,15 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('sales/{salesOrder}/complete', [SalesOrderController::class, 'complete'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/cancel', [SalesOrderController::class, 'cancel'])->middleware('permission:sales.cancel');
         Route::post('sales/{salesOrder}/return-items', [SalesOrderController::class, 'returnItems'])->middleware('permission:sales.confirm');
+        Route::patch('sales/{salesOrder}/items/{salesOrderItem}', [SalesOrderController::class, 'updateItem'])->middleware('permission:sales.view');
 
         // Thanh toán
         Route::get('payments', [PaymentController::class, 'index'])->middleware('permission:payments.view');
         Route::get('payments/advance-balance', [PaymentController::class, 'advanceBalance'])->middleware('permission:payments.view');
         Route::get('payments/{payment}', [PaymentController::class, 'show'])->middleware('permission:payments.view');
         Route::post('payments', [PaymentController::class, 'store'])->middleware('permission:payments.create');
+        Route::post('payments/{payment}/approve', [PaymentController::class, 'approve'])->middleware('permission:payments.create');
+        Route::delete('payments/{payment}', [PaymentController::class, 'destroy'])->middleware('permission:payments.delete');
 
         // Tài sản cố định
         Route::get('fixed-assets', [FixedAssetController::class, 'index'])->middleware('permission:assets.view');
@@ -190,6 +218,19 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('reports/sales-by-employee', [ReportController::class, 'salesByEmployee']);
         });
 
+        // Ngân hàng (dữ liệu tham chiếu, không cần permission)
+        Route::get('banks', [BankController::class, 'index']);
+
+        // Tỉnh / Phường (dữ liệu tham chiếu, không cần permission)
+        Route::get('provinces', [ProvinceController::class, 'index']);
+        Route::get('provinces/{province}/wards', [ProvinceController::class, 'wards']);
+
+        // Quản lý bàn ăn (nhà hàng)
+        Route::get('restaurant/tables', [RestaurantTableController::class, 'index']);
+        Route::post('restaurant/tables', [RestaurantTableController::class, 'store']);
+        Route::put('restaurant/tables/{restaurantTable}', [RestaurantTableController::class, 'update']);
+        Route::delete('restaurant/tables/{restaurantTable}', [RestaurantTableController::class, 'destroy']);
+
         // Cài đặt — chỉ admin
         Route::middleware('permission:settings.edit')->group(function () {
             Route::get('organization', [OrganizationController::class, 'show']);
@@ -213,5 +254,29 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('roles', [RoleController::class, 'store'])->middleware('permission:roles.create');
         Route::put('roles/{role}', [RoleController::class, 'update'])->middleware('permission:roles.edit');
         Route::delete('roles/{role}', [RoleController::class, 'destroy'])->middleware('permission:roles.delete');
+
+        // Tour du lịch
+        Route::get('tours', [TourController::class, 'index']);
+        Route::post('tours', [TourController::class, 'store']);
+        Route::get('tours/{tour}', [TourController::class, 'show']);
+        Route::put('tours/{tour}', [TourController::class, 'update']);
+        Route::post('tours/{tour}/confirm', [TourController::class, 'confirm']);
+        Route::post('tours/{tour}/complete', [TourController::class, 'complete']);
+        Route::post('tours/{tour}/cancel', [TourController::class, 'cancel']);
+        Route::post('tours/{tour}/collect', [TourController::class, 'collect']);
+        Route::delete('tours/{tour}', [TourController::class, 'destroy']);
+
+        // Tạm ứng hướng dẫn viên
+        Route::get('tours/{tour}/guide-advances', [TourGuideAdvanceController::class, 'index']);
+        Route::post('tours/{tour}/guide-advances', [TourGuideAdvanceController::class, 'store']);
+        Route::delete('tour-guide-advances/{tourGuideAdvance}', [TourGuideAdvanceController::class, 'destroy'])->middleware('permission:payments.delete');
+
+        // Phiếu thanh toán dịch vụ tour
+        Route::get('tour-payments', [TourPaymentController::class, 'index']);
+        Route::post('tour-payments', [TourPaymentController::class, 'store']);
+        Route::get('tour-payments/supplier-advance-balance', [TourPaymentController::class, 'supplierAdvanceBalance']);
+        Route::post('tour-payments/{tourPayment}/approve', [TourPaymentController::class, 'approve']);
+        Route::post('tour-payments/{tourPayment}/reject', [TourPaymentController::class, 'reject']);
+        Route::delete('tour-payments/{tourPayment}', [TourPaymentController::class, 'destroy'])->middleware('permission:payments.delete');
     });
 });

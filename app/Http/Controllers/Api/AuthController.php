@@ -27,6 +27,7 @@ class AuthController extends Controller
             'company_name' => ['required', 'string', 'max:255'],
             'company_tax_code' => ['nullable', 'string', 'max:50'],
             'company_address' => ['nullable', 'string', 'max:255'],
+            'business_mode' => ['required', 'in:retail,restaurant,tour'],
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
@@ -37,6 +38,7 @@ class AuthController extends Controller
                 'name' => $validated['company_name'],
                 'tax_code' => $validated['company_tax_code'] ?? null,
                 'address' => $validated['company_address'] ?? null,
+                'settings' => ['business_mode' => $validated['business_mode']],
             ]);
 
             $user = User::create([

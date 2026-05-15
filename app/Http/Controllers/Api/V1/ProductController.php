@@ -9,6 +9,7 @@ use App\Models\Product;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 
@@ -26,6 +27,7 @@ class ProductController extends Controller
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('code', 'like', "%{$v}%"))
             ->when($request->category_id, fn ($q, $v) => $q->where('category_id', $v))
             ->when($request->boolean('active_only', false), fn ($q) => $q->where('is_active', true))
+            ->when($request->product_type, fn ($q, $v) => $q->where('product_type', $v))
             ->orderBy($sortBy, $sortDir)
             ->paginate((int) ($request->per_page ?? 20));
 
@@ -58,6 +60,7 @@ class ProductController extends Controller
             'price' => ['required', 'numeric', 'min:0'],
             'cost_price' => ['required', 'numeric', 'min:0'],
             'is_active' => ['boolean'],
+            'product_type' => ['nullable', 'in:product,ingredient'],
             'units' => ['nullable', 'array'],
             'units.*.name' => ['required', 'string'],
             'units.*.conversion_factor' => ['required', 'numeric', 'min:0.0001'],
@@ -90,6 +93,7 @@ class ProductController extends Controller
             'price' => ['sometimes', 'numeric', 'min:0'],
             'cost_price' => ['sometimes', 'numeric', 'min:0'],
             'is_active' => ['boolean'],
+            'product_type' => ['nullable', 'in:product,ingredient'],
             'units' => ['nullable', 'array'],
             'units.*.name' => ['required_with:units', 'string'],
             'units.*.conversion_factor' => ['required_with:units', 'numeric', 'min:0.0001'],
@@ -106,7 +110,34 @@ class ProductController extends Controller
 
     public function destroy(Product $product): JsonResponse
     {
+        if ($product->image_path) {
+            Storage::disk('public')->delete($product->image_path);
+        }
         $product->delete();
+
+        return response()->json(null, 204);
+    }
+
+    public function uploadImage(Request $request, Product $product): ProductResource
+    {
+        $request->validate(['image' => ['required', 'image', 'max:2048']]);
+
+        if ($product->image_path) {
+            Storage::disk('public')->delete($product->image_path);
+        }
+
+        $path = $request->file('image')->store('products/'.$product->organization_id, 'public');
+        $product->update(['image_path' => $path]);
+
+        return new ProductResource($product->load(['category.parent', 'units']));
+    }
+
+    public function deleteImage(Product $product): JsonResponse
+    {
+        if ($product->image_path) {
+            Storage::disk('public')->delete($product->image_path);
+            $product->update(['image_path' => null]);
+        }
 
         return response()->json(null, 204);
     }

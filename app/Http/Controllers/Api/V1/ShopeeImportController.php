@@ -11,6 +11,7 @@ use App\Models\Inventory;
 use App\Models\Product;
 use App\Models\SalesOrder;
 use App\Models\Warehouse;
+use App\Services\SalesOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -19,6 +20,8 @@ use Illuminate\Support\Facades\DB;
 class ShopeeImportController extends Controller
 {
     use ScopedByOrganization;
+
+    public function __construct(protected SalesOrderService $salesOrderService) {}
 
     public function import(Request $request): JsonResponse
     {
@@ -81,11 +84,20 @@ class ShopeeImportController extends Controller
             $firstRow = $orderRows->first();
             $mappedStatus = $this->resolveStatus($firstRow['status'] ?? '');
 
-            // If order already exists by ref_id → update status only
+            // If order already exists by ref_id → confirm if transitioning from Draft, then update status
             $existingOrder = SalesOrder::where('ref_id', (string) $orderId)->first();
             if ($existingOrder) {
                 try {
-                    $existingOrder->update(['status' => $mappedStatus]);
+                    DB::transaction(function () use ($existingOrder, $mappedStatus) {
+                        if ($existingOrder->status === OrderStatus::Draft && $mappedStatus !== OrderStatus::Draft) {
+                            $existingOrder->load('items.product');
+                            $this->salesOrderService->confirm($existingOrder);
+                        }
+
+                        if ($mappedStatus !== $existingOrder->status) {
+                            $existingOrder->update(['status' => $mappedStatus]);
+                        }
+                    });
                     $updated++;
                 } catch (\Throwable $e) {
                     $failed++;
@@ -107,8 +119,7 @@ class ShopeeImportController extends Controller
             }
 
             try {
-                DB::transaction(function () use ($orderId, $orderRows, $orgId, $warehouse, $productsByCode, $mappedStatus) {
-                    $firstRow = $orderRows->first();
+                DB::transaction(function () use ($orderId, $orderRows, $orgId, $warehouse, $productsByCode, $mappedStatus, $firstRow) {
                     $buyerName = trim($firstRow['buyer'] ?? '') ?: 'Khách Shopee';
                     $shippingAddress = trim($firstRow['shipping_address'] ?? '') ?: null;
                     $trackingNumber = trim($firstRow['tracking_number'] ?? '') ?: null;
@@ -173,7 +184,7 @@ class ShopeeImportController extends Controller
                         'order_number' => 'BH'.str_pad($seq, 6, '0', STR_PAD_LEFT),
                         'ref_id' => (string) $orderId,
                         'tracking_number' => $trackingNumber,
-                        'status' => $mappedStatus,
+                        'status' => OrderStatus::Draft,
                         'organization_id' => $orgId,
                         'company_id' => $company->id,
                         'order_date' => now()->toDateString(),
@@ -211,6 +222,14 @@ class ShopeeImportController extends Controller
                     }
 
                     $order->update(['subtotal' => $subtotal, 'total_amount' => $subtotal]);
+
+                    if ($mappedStatus !== OrderStatus::Draft) {
+                        $order->load('items.product');
+                        $this->salesOrderService->confirm($order);
+                        if (in_array($mappedStatus, [OrderStatus::Shipping, OrderStatus::Completed], true)) {
+                            $order->update(['status' => $mappedStatus]);
+                        }
+                    }
                 });
 
                 $success++;

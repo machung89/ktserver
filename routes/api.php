@@ -238,6 +238,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('organization', [OrganizationController::class, 'show']);
             Route::put('organization', [OrganizationController::class, 'update']);
             Route::post('organization/reset-data', [OrganizationController::class, 'resetData']);
+            Route::post('organization/delete-all-products', [OrganizationController::class, 'deleteAllProducts']);
+            Route::post('organization/delete-all-companies', [OrganizationController::class, 'deleteAllCompanies']);
         });
 
         // Nhân viên & phân quyền — chỉ admin

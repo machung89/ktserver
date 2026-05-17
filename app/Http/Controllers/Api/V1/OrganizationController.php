@@ -54,6 +54,58 @@ class OrganizationController extends Controller
         return response()->json(['data' => $this->format($org->load('bank'))]);
     }
 
+    public function deleteAllProducts(Request $request): JsonResponse
+    {
+        $request->validate(['confirm' => ['required', 'string', 'in:XOA']]);
+
+        $orgId = $this->orgId();
+        $productIds = DB::table('products')->where('organization_id', $orgId)->pluck('id');
+
+        if ($productIds->isEmpty()) {
+            return response()->json(['message' => 'Không có sản phẩm nào để xóa']);
+        }
+
+        $blockingCount = DB::table('sales_order_items')->whereIn('product_id', $productIds)->count()
+            + DB::table('purchase_order_items')->whereIn('product_id', $productIds)->count();
+
+        if ($blockingCount > 0) {
+            return response()->json([
+                'message' => "Không thể xóa: có {$blockingCount} dòng đơn hàng đang tham chiếu đến sản phẩm. Hãy reset dữ liệu giao dịch trước.",
+            ], 422);
+        }
+
+        DB::transaction(function () use ($productIds, $orgId) {
+            DB::table('inventory_transaction_items')->whereIn('product_id', $productIds)->delete();
+            DB::table('inventories')->where('organization_id', $orgId)->delete();
+            DB::table('recipe_ingredients')->whereIn('product_id', $productIds)->orWhereIn('ingredient_id', $productIds)->delete();
+            DB::table('recipes')->whereIn('product_id', $productIds)->delete();
+            DB::table('products')->where('organization_id', $orgId)->delete();
+        });
+
+        return response()->json(['message' => 'Đã xóa toàn bộ sản phẩm']);
+    }
+
+    public function deleteAllCompanies(Request $request): JsonResponse
+    {
+        $request->validate(['confirm' => ['required', 'string', 'in:XOA']]);
+
+        $orgId = $this->orgId();
+        $companyIds = DB::table('companies')->where('organization_id', $orgId)->pluck('id');
+
+        if ($companyIds->isEmpty()) {
+            return response()->json(['message' => 'Không có đối tác nào để xóa']);
+        }
+
+        DB::transaction(function () use ($companyIds, $orgId) {
+            DB::table('sales_orders')->where('organization_id', $orgId)->whereIn('company_id', $companyIds)->update(['company_id' => null]);
+            DB::table('purchase_orders')->where('organization_id', $orgId)->whereIn('company_id', $companyIds)->update(['company_id' => null]);
+            DB::table('payments')->where('organization_id', $orgId)->whereIn('company_id', $companyIds)->update(['company_id' => null]);
+            DB::table('companies')->where('organization_id', $orgId)->delete();
+        });
+
+        return response()->json(['message' => 'Đã xóa toàn bộ đối tác']);
+    }
+
     public function resetData(Request $request): JsonResponse
     {
         $request->validate([

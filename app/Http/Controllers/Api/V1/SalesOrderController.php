@@ -72,6 +72,11 @@ class SalesOrderController extends Controller
             ->get()
             ->mapWithKeys(fn ($r) => [$r->getRawOriginal('status') => (int) $r->cnt]);
 
+        $debt = (clone $base)
+            ->where('status', 'completed')
+            ->whereIn('payment_status', ['unpaid', 'partial'])
+            ->count();
+
         return response()->json([
             'all' => (int) (clone $base)->count(),
             'draft' => $counts['draft'] ?? 0,
@@ -79,6 +84,7 @@ class SalesOrderController extends Controller
             'shipping' => $counts['shipping'] ?? 0,
             'completed' => $counts['completed'] ?? 0,
             'cancelled' => $counts['cancelled'] ?? 0,
+            'debt' => (int) $debt,
         ]);
     }
 

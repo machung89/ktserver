@@ -6,4 +6,5 @@ enum PaymentType: string
 {
     case Receipt = 'receipt';
     case Payment = 'payment';
+    case Transfer = 'transfer';
 }

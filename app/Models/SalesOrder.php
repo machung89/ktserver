@@ -14,7 +14,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
-#[Fillable(['order_number', 'company_id', 'restaurant_table_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'notes', 'promotion_id', 'organization_id', 'payment_status', 'paid_amount', 'created_by'])]
+#[Fillable(['order_number', 'ref_id', 'tracking_number', 'company_id', 'restaurant_table_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'notes', 'promotion_id', 'organization_id', 'payment_status', 'paid_amount', 'created_by'])]
 class SalesOrder extends Model
 {
     /** @use HasFactory<SalesOrderFactory> */

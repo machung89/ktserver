@@ -514,27 +514,52 @@ class ReportController extends Controller
                 ->where('type', PaymentType::Receipt)
                 ->whereDate('payment_date', '<', $dateFrom)
                 ->sum('amount');
+            // Chuyển tiền đến TK này = thu
+            $openingTransferIn = Payment::whereIn('to_account_id', $accountIds)
+                ->where('type', PaymentType::Transfer)
+                ->whereDate('payment_date', '<', $dateFrom)
+                ->sum('amount');
             $openingChi = Payment::whereIn('account_id', $accountIds)
                 ->where('type', PaymentType::Payment)
                 ->whereDate('payment_date', '<', $dateFrom)
                 ->sum('amount');
-            $openingBalance = (float) $openingThu - (float) $openingChi;
+            // Chuyển tiền đi từ TK này = chi
+            $openingTransferOut = Payment::whereIn('account_id', $accountIds)
+                ->where('type', PaymentType::Transfer)
+                ->whereDate('payment_date', '<', $dateFrom)
+                ->sum('amount');
+            $openingBalance = (float) $openingThu + (float) $openingTransferIn
+                - (float) $openingChi - (float) $openingTransferOut;
         }
 
-        $entries = Payment::with(['company', 'account'])
+        // Phiếu thông thường và chuyển tiền đi (account_id match)
+        $outEntries = Payment::with(['company', 'account', 'toAccount'])
             ->whereIn('account_id', $accountIds)
             ->when($dateFrom, fn ($q, $v) => $q->whereDate('payment_date', '>=', $v))
             ->when($dateTo, fn ($q, $v) => $q->whereDate('payment_date', '<=', $v))
-            ->orderBy('payment_date')
-            ->orderBy('id')
-            ->get();
+            ->get()
+            ->each(fn ($p) => $p->_inflow = false);
 
-        // Single query to get the counterpart account for each payment
+        // Chuyển tiền đến (to_account_id match) — đây là phần bị bỏ sót
+        $inEntries = Payment::with(['company', 'account', 'toAccount'])
+            ->whereIn('to_account_id', $accountIds)
+            ->where('type', PaymentType::Transfer)
+            ->when($dateFrom, fn ($q, $v) => $q->whereDate('payment_date', '>=', $v))
+            ->when($dateTo, fn ($q, $v) => $q->whereDate('payment_date', '<=', $v))
+            ->get()
+            ->each(fn ($p) => $p->_inflow = true);
+
+        $entries = $outEntries->merge($inEntries)
+            ->sortBy([['payment_date', 'asc'], ['id', 'asc']])
+            ->values();
+
+        // Tài khoản đối ứng cho phiếu thu/chi thông thường
+        $regularIds = $outEntries->where('type', '!=', PaymentType::Transfer)->pluck('id');
         $counterpartMap = DB::table('journal_entries as je')
             ->join('journal_entry_lines as jel', 'jel.journal_entry_id', '=', 'je.id')
             ->join('accounts as a', 'a.id', '=', 'jel.account_id')
             ->where('je.reference_type', Payment::class)
-            ->whereIn('je.reference_id', $entries->pluck('id'))
+            ->whereIn('je.reference_id', $regularIds)
             ->where('a.code', 'not like', '111%')
             ->where('a.code', 'not like', '112%')
             ->select('je.reference_id as payment_id', 'a.code', 'a.name')
@@ -547,14 +572,25 @@ class ReportController extends Controller
 
         $rows = $entries->map(function (Payment $p) use (&$balance, &$totalThu, &$totalChi, $counterpartMap) {
             $amount = (float) $p->amount;
-            $isReceipt = $p->type === PaymentType::Receipt;
-            $thu = $isReceipt ? $amount : 0.0;
-            $chi = $isReceipt ? 0.0 : $amount;
+            $type = $p->type instanceof PaymentType ? $p->type : PaymentType::from($p->type->value ?? $p->type);
+            $isInflow = $type === PaymentType::Receipt
+                || ($type === PaymentType::Transfer && $p->_inflow);
+
+            $thu = $isInflow ? $amount : 0.0;
+            $chi = $isInflow ? 0.0 : $amount;
             $totalThu += $thu;
             $totalChi += $chi;
             $balance += $thu - $chi;
 
-            $cp = $counterpartMap->get($p->id);
+            // Tài khoản đối ứng
+            if ($type === PaymentType::Transfer) {
+                $counterAccount = $p->_inflow ? $p->account : $p->toAccount;
+                $cp = $counterAccount ? (object) ['code' => $counterAccount->code, 'name' => $counterAccount->name] : null;
+            } else {
+                $cp = $counterpartMap->get($p->id);
+            }
+
+            $displayAccount = $p->_inflow ? $p->toAccount : $p->account;
 
             return [
                 'id' => $p->id,
@@ -562,8 +598,8 @@ class ReportController extends Controller
                 'payment_date' => $p->payment_date->toDateString(),
                 'description' => $p->description,
                 'company' => $p->company?->name,
-                'account_code' => $p->account?->code,
-                'account_name' => $p->account?->name,
+                'account_code' => $displayAccount?->code,
+                'account_name' => $displayAccount?->name,
                 'counterpart_code' => $cp?->code,
                 'counterpart_name' => $cp?->name,
                 'thu' => $thu,

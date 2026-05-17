@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Organization;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class OrganizationController extends Controller
@@ -51,6 +52,70 @@ class OrganizationController extends Controller
         $org->update($validated);
 
         return response()->json(['data' => $this->format($org->load('bank'))]);
+    }
+
+    public function resetData(Request $request): JsonResponse
+    {
+        $request->validate([
+            'confirm' => ['required', 'string', 'in:RESET'],
+        ]);
+
+        $orgId = $this->orgId();
+
+        DB::transaction(function () use ($orgId) {
+            // Tour
+            DB::table('tour_guide_advances')->where('organization_id', $orgId)->delete();
+            DB::table('tour_payment_requests')->whereIn(
+                'tour_id',
+                DB::table('tours')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('tour_services')->whereIn(
+                'tour_id',
+                DB::table('tours')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('tours')->where('organization_id', $orgId)->delete();
+
+            // Tài sản cố định
+            DB::table('fixed_asset_depreciations')->whereIn(
+                'fixed_asset_id',
+                DB::table('fixed_assets')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('fixed_assets')->where('organization_id', $orgId)->delete();
+
+            // Đơn bán
+            DB::table('sales_order_items')->whereIn(
+                'sales_order_id',
+                DB::table('sales_orders')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('sales_orders')->where('organization_id', $orgId)->delete();
+
+            // Đơn mua
+            DB::table('purchase_order_items')->whereIn(
+                'purchase_order_id',
+                DB::table('purchase_orders')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('purchase_orders')->where('organization_id', $orgId)->delete();
+
+            // Thanh toán
+            DB::table('payments')->where('organization_id', $orgId)->delete();
+
+            // Bút toán
+            DB::table('journal_entry_lines')->whereIn(
+                'journal_entry_id',
+                DB::table('journal_entries')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('journal_entries')->where('organization_id', $orgId)->delete();
+
+            // Tồn kho
+            DB::table('inventory_transaction_items')->whereIn(
+                'inventory_transaction_id',
+                DB::table('inventory_transactions')->where('organization_id', $orgId)->pluck('id')
+            )->delete();
+            DB::table('inventory_transactions')->where('organization_id', $orgId)->delete();
+            DB::table('inventories')->where('organization_id', $orgId)->delete();
+        });
+
+        return response()->json(['message' => 'Đã xóa toàn bộ dữ liệu giao dịch']);
     }
 
     /** @return array<string, mixed> */

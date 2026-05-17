@@ -78,7 +78,7 @@ class PaymentService
                 }
             }
 
-            $payment->load(['company', 'account', 'expenseAccount']);
+            $payment->load(['company', 'account', 'toAccount', 'expenseAccount']);
 
             $ref = $payment->reference;
             if ($ref instanceof SalesOrder || $ref instanceof PurchaseOrder) {
@@ -223,11 +223,19 @@ class PaymentService
      *   Thu bình thường:               Nợ 111/112 / Có 131
      *   Chi phí kinh doanh:            Nợ 641/...  / Có 111/112
      *   Chi NCC (mặc định):            Nợ 331      / Có 111/112
+     *   Chuyển tiền:                   Nợ to_account / Có account_id
      *
      * @return array<int, array{account_code: string, description: string, debit: float, credit: float}>|null
      */
     private function buildLines(Payment $payment, ?object $account, string $desc, float $amount): ?array
     {
+        if ($payment->type === PaymentType::Transfer) {
+            return [
+                ['account_code' => $payment->toAccount->code, 'description' => $desc, 'debit' => $amount, 'credit' => 0],
+                ['account_code' => $account->code, 'description' => $desc, 'debit' => 0, 'credit' => $amount],
+            ];
+        }
+
         if ($payment->type === PaymentType::Receipt) {
             if (! $account) {
                 return null;
@@ -254,7 +262,11 @@ class PaymentService
 
     private function generatePaymentNumber(string $type): string
     {
-        $prefix = $type === 'receipt' ? 'PT' : 'PC';
+        $prefix = match ($type) {
+            'receipt' => 'PT',
+            'transfer' => 'CT',
+            default => 'PC',
+        };
         $last = Payment::where('type', $type)->orderByDesc('id')->lockForUpdate()->first();
         $seq = $last ? ((int) substr($last->payment_number, 2)) + 1 : 1;
 

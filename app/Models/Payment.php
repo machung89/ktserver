@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 
-#[Fillable(['payment_number', 'type', 'company_id', 'account_id', 'expense_account_id', 'payment_date', 'amount', 'description', 'organization_id', 'reference_type', 'reference_id', 'is_advance', 'status'])]
+#[Fillable(['payment_number', 'type', 'company_id', 'account_id', 'to_account_id', 'expense_account_id', 'payment_date', 'amount', 'description', 'organization_id', 'reference_type', 'reference_id', 'is_advance', 'status'])]
 class Payment extends Model
 {
     /** @use HasFactory<PaymentFactory> */
@@ -40,6 +40,11 @@ class Payment extends Model
     public function account(): BelongsTo
     {
         return $this->belongsTo(Account::class);
+    }
+
+    public function toAccount(): BelongsTo
+    {
+        return $this->belongsTo(Account::class, 'to_account_id');
     }
 
     public function expenseAccount(): BelongsTo

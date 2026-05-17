@@ -49,13 +49,15 @@ class PaymentController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $isTransfer = $request->input('type') === PaymentType::Transfer->value;
         $hasExpenseAccount = $request->filled('expense_account_id');
         $isApplyingAdvance = $request->boolean('is_advance') && $request->filled('reference_id');
 
         $validated = $request->validate([
             'type' => ['required', Rule::enum(PaymentType::class)],
-            'company_id' => [$hasExpenseAccount ? 'nullable' : 'required', 'exists:companies,id'],
+            'company_id' => [$isTransfer || $hasExpenseAccount ? 'nullable' : 'required', 'nullable', 'exists:companies,id'],
             'account_id' => [$isApplyingAdvance ? 'nullable' : 'required', 'nullable', 'exists:accounts,id'],
+            'to_account_id' => [$isTransfer ? 'required' : 'nullable', 'nullable', 'exists:accounts,id', 'different:account_id'],
             'expense_account_id' => ['nullable', 'exists:accounts,id'],
             'payment_date' => ['required', 'date'],
             'amount' => ['required', 'numeric', 'min:0.01'],

@@ -43,6 +43,7 @@ class OrganizationController extends Controller
             'settings.enable_sales_tax' => ['boolean'],
             'settings.default_tax_rate' => ['numeric', 'min:0', 'max:100'],
             'settings.enable_discount' => ['boolean'],
+            'settings.enable_employee_profit' => ['boolean'],
             'settings.business_mode' => ['nullable', Rule::in(['retail', 'restaurant', 'tour'])],
             'bank_id' => ['nullable', 'exists:banks,id'],
             'bank_account_name' => ['nullable', 'string', 'max:255'],
@@ -203,6 +204,7 @@ class OrganizationController extends Controller
                 'enable_sales_tax' => (bool) $org->setting('enable_sales_tax', false),
                 'default_tax_rate' => (float) $org->setting('default_tax_rate', 0),
                 'enable_discount' => (bool) $org->setting('enable_discount', false),
+                'enable_employee_profit' => (bool) $org->setting('enable_employee_profit', false),
                 'business_mode' => $org->setting('business_mode', 'retail'),
             ],
         ];

@@ -71,6 +71,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
                     'enable_sales_tax' => (bool) $org?->setting('enable_sales_tax', false),
                     'default_tax_rate' => (float) $org?->setting('default_tax_rate', 0),
                     'enable_discount' => (bool) $org?->setting('enable_discount', false),
+                    'enable_employee_profit' => (bool) $org?->setting('enable_employee_profit', false),
                     'business_mode' => $org?->setting('business_mode', 'retail'),
                     'org_name' => $org?->name,
                 ],

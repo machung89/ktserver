@@ -222,6 +222,10 @@ class SalesOrderController extends Controller
 
                 $subtotal = 0;
                 $taxAmount = 0;
+                $standardTotal = 0;
+
+                $standardPrices = Product::whereIn('id', array_column($validated['items'], 'product_id'))
+                    ->pluck('standard_price', 'id');
 
                 foreach ($validated['items'] as $item) {
                     $base = (float) $item['quantity'] * (float) $item['unit_price'];
@@ -236,6 +240,12 @@ class SalesOrderController extends Controller
                     $taxRate = (float) ($item['tax_rate'] ?? 0);
                     $subtotal += $amount;
                     $taxAmount += $amount * $taxRate / 100;
+                    $itemStandardPrice = $standardPrices[$item['product_id']] ?? null;
+                    if ($itemStandardPrice !== null && (float) $itemStandardPrice > 0) {
+                        $standardTotal += (float) $item['quantity'] * (float) $itemStandardPrice;
+                    } else {
+                        $itemStandardPrice = null;
+                    }
 
                     $order->items()->create([
                         'product_id' => $item['product_id'],
@@ -245,6 +255,7 @@ class SalesOrderController extends Controller
                         'discount_type' => $discountType,
                         'discount_value' => $discountValue,
                         'cost_price' => $item['cost_price'] ?? 0,
+                        'standard_price' => $itemStandardPrice,
                         'tax_rate' => $taxRate,
                         'amount' => $amount,
                     ]);
@@ -278,11 +289,14 @@ class SalesOrderController extends Controller
                     default => 0,
                 };
 
+                $totalAmount = $subtotal + $taxAmount - $orderDiscountAmount;
                 $order->update([
                     'subtotal' => $subtotal,
                     'tax_amount' => $taxAmount,
                     'discount_amount' => $orderDiscountAmount,
-                    'total_amount' => $subtotal + $taxAmount - $orderDiscountAmount,
+                    'total_amount' => $totalAmount,
+                    'standard_total' => $standardTotal,
+                    'employee_profit' => $standardTotal > 0 ? $totalAmount - $standardTotal : 0,
                 ]);
 
                 return $order;
@@ -391,6 +405,10 @@ class SalesOrderController extends Controller
             // Recreate items and reservations
             $subtotal = 0;
             $taxAmount = 0;
+            $standardTotal = 0;
+
+            $standardPrices = Product::whereIn('id', array_column($validated['items'], 'product_id'))
+                ->pluck('standard_price', 'id');
 
             foreach ($validated['items'] as $item) {
                 $base = (float) $item['quantity'] * (float) $item['unit_price'];
@@ -405,6 +423,10 @@ class SalesOrderController extends Controller
                 $taxRate = (float) ($item['tax_rate'] ?? 0);
                 $subtotal += $amount;
                 $taxAmount += $amount * $taxRate / 100;
+                $itemStandardPrice = $standardPrices[$item['product_id']] ?? null;
+                if ($itemStandardPrice !== null) {
+                    $standardTotal += (float) $item['quantity'] * (float) $itemStandardPrice;
+                }
 
                 $salesOrder->items()->create([
                     'product_id' => $item['product_id'],
@@ -414,6 +436,7 @@ class SalesOrderController extends Controller
                     'discount_type' => $discountType,
                     'discount_value' => $discountValue,
                     'cost_price' => $item['cost_price'] ?? 0,
+                    'standard_price' => $itemStandardPrice,
                     'tax_rate' => $taxRate,
                     'amount' => $amount,
                     'is_served' => $item['is_served'] ?? false,
@@ -447,11 +470,14 @@ class SalesOrderController extends Controller
                 default => 0,
             };
 
+            $totalAmount = $subtotal + $taxAmount - $orderDiscountAmount;
             $salesOrder->update([
                 'subtotal' => $subtotal,
                 'tax_amount' => $taxAmount,
                 'discount_amount' => $orderDiscountAmount,
-                'total_amount' => $subtotal + $taxAmount - $orderDiscountAmount,
+                'total_amount' => $totalAmount,
+                'standard_total' => $standardTotal > 0 ? $standardTotal : null,
+                'employee_profit' => $standardTotal > 0 ? $totalAmount - $standardTotal : null,
             ]);
         });
 

@@ -20,6 +20,7 @@ class ProductResource extends JsonResource
             'category_id' => $this->category_id,
             'category' => new ProductCategoryResource($this->whenLoaded('category')),
             'price' => $this->price,
+            'standard_price' => $this->standard_price,
             'cost_price' => $this->cost_price,
             'is_active' => $this->is_active,
             'units' => $this->whenLoaded('units', fn () => $this->units->map(fn ($u) => [

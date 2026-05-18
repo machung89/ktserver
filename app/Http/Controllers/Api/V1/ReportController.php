@@ -182,13 +182,18 @@ class ReportController extends Controller
             $first = $rows->first();
             $product = $first->product;
             $qty = $rows->sum(fn ($r) => (float) $r->quantity);
-            $revenue = $rows->sum(fn ($r) => (float) $r->amount);
+            $revenue = $rows->sum(fn ($r) => (float) $r->amount * (1 + (float) $r->tax_rate / 100));
             $cost = $rows->sum(fn ($r) => (float) $r->quantity * (float) $r->cost_price);
+            $standardTotal = $rows->sum(fn ($r) => (float) $r->standard_price > 0 ? (float) $r->quantity * (float) $r->standard_price : 0);
 
             $cat = $product?->category;
             $catLabel = $cat
                 ? ($cat->parent ? $cat->parent->name.' › '.$cat->name : $cat->name)
                 : null;
+
+            $revenue = round($revenue, 2);
+            $cost = round($cost, 2);
+            $standardTotal = round($standardTotal, 2);
 
             return [
                 'product_code' => $product?->code ?? '',
@@ -196,10 +201,12 @@ class ReportController extends Controller
                 'unit' => $product?->unit ?? '',
                 'category' => $catLabel,
                 'quantity' => round($qty, 3),
-                'revenue' => round($revenue, 2),
-                'cost' => round($cost, 2),
+                'revenue' => $revenue,
+                'cost' => $cost,
                 'profit' => round($revenue - $cost, 2),
                 'margin' => $revenue > 0 ? round(($revenue - $cost) / $revenue * 100, 1) : 0,
+                'standard_total' => $standardTotal,
+                'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : 0,
             ];
         })
             ->filter(fn ($r) => $r['quantity'] != 0 || $r['revenue'] != 0)
@@ -230,8 +237,9 @@ class ReportController extends Controller
             ->select([
                 DB::raw('DATE(so.order_date) as date'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(so.total_amount) as revenue'),
+                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+                DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
             ->orderBy(DB::raw('DATE(so.order_date)'))
             ->get()
@@ -239,6 +247,7 @@ class ReportController extends Controller
                 $revenue = round((float) $r->revenue, 2);
                 $cost = round((float) $r->cost, 2);
                 $profit = round($revenue - $cost, 2);
+                $standardTotal = round((float) $r->standard_total, 2);
 
                 return [
                     'date' => $r->date,
@@ -247,6 +256,8 @@ class ReportController extends Controller
                     'cost' => $cost,
                     'profit' => $profit,
                     'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                    'standard_total' => $standardTotal,
+                    'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
                 ];
             });
 
@@ -277,15 +288,17 @@ class ReportController extends Controller
                 DB::raw("COALESCE(CASE WHEN parent_pc.name IS NOT NULL THEN CONCAT(parent_pc.name, ' › ', pc.name) ELSE pc.name END, '(Chưa phân loại)') as category_name"),
                 DB::raw('SUM(soi.quantity) as quantity'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(soi.amount) as revenue'),
+                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+                DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(soi.amount)'))
+            ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
             ->get()
             ->map(function ($r) {
                 $revenue = round((float) $r->revenue, 2);
                 $cost = round((float) $r->cost, 2);
                 $profit = round($revenue - $cost, 2);
+                $standardTotal = round((float) $r->standard_total, 2);
 
                 return [
                     'category_name' => $r->category_name,
@@ -295,6 +308,8 @@ class ReportController extends Controller
                     'cost' => $cost,
                     'profit' => $profit,
                     'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                    'standard_total' => $standardTotal,
+                    'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
                 ];
             });
 
@@ -637,15 +652,17 @@ class ReportController extends Controller
                 'u.department',
                 'u.position',
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(so.total_amount) as revenue'),
+                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+                DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(so.total_amount)'))
+            ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
             ->get()
             ->map(function ($r) {
                 $revenue = round((float) $r->revenue, 2);
                 $cost = round((float) $r->cost, 2);
                 $profit = round($revenue - $cost, 2);
+                $standardTotal = round((float) $r->standard_total, 2);
 
                 return [
                     'user_id' => $r->user_id,
@@ -657,6 +674,8 @@ class ReportController extends Controller
                     'cost' => $cost,
                     'profit' => $profit,
                     'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                    'standard_total' => $standardTotal,
+                    'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
                 ];
             });
 
@@ -664,7 +683,7 @@ class ReportController extends Controller
             'data' => $rows,
             'total_revenue' => round($rows->sum('revenue'), 2),
             'total_cost' => round($rows->sum('cost'), 2),
-            'total_profit' => round($rows->sum('profit'), 2),
+            'gross_profit' => round($rows->sum('profit'), 2),
         ]);
     }
 

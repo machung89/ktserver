@@ -19,6 +19,7 @@ class SalesOrderItemResource extends JsonResource
             'discount_type' => $this->discount_type,
             'discount_value' => $this->discount_value,
             'cost_price' => $this->cost_price,
+            'standard_price' => $this->standard_price,
             'tax_rate' => $this->tax_rate,
             'amount' => $this->amount,
             'is_return' => $this->is_return,

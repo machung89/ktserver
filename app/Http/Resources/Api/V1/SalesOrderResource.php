@@ -24,6 +24,8 @@ class SalesOrderResource extends JsonResource
             'discount_value' => $this->discount_value,
             'discount_amount' => $this->discount_amount,
             'total_amount' => $this->total_amount,
+            'standard_total' => $this->standard_total,
+            'employee_profit' => $this->employee_profit,
             'payment_status' => $this->payment_status,
             'paid_amount' => $this->paid_amount,
             'notes' => $this->notes,

@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
@@ -74,5 +75,10 @@ class SalesOrder extends Model
     public function payments(): MorphMany
     {
         return $this->morphMany(Payment::class, 'reference');
+    }
+
+    public function warehouseExports(): BelongsToMany
+    {
+        return $this->belongsToMany(WarehouseExport::class, 'warehouse_export_orders');
     }
 }

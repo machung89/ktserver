@@ -37,6 +37,7 @@ class SalesOrderController extends Controller
         $canViewAll = $user->hasPermission('sales.view_all');
 
         $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable'])
+            ->withExists('warehouseExports')
             ->when(! $canViewAll, fn ($q) => $q->where('created_by', Auth::id()))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
@@ -240,11 +241,11 @@ class SalesOrderController extends Controller
                     $taxRate = (float) ($item['tax_rate'] ?? 0);
                     $subtotal += $amount;
                     $taxAmount += $amount * $taxRate / 100;
-                    $itemStandardPrice = $standardPrices[$item['product_id']] ?? null;
-                    if ($itemStandardPrice !== null && (float) $itemStandardPrice > 0) {
-                        $standardTotal += (float) $item['quantity'] * (float) $itemStandardPrice;
+                    $itemStandardPrice = (float) ($standardPrices[$item['product_id']] ?? 0);
+                    if ($itemStandardPrice > 0) {
+                        $standardTotal += (float) $item['quantity'] * $itemStandardPrice;
                     } else {
-                        $itemStandardPrice = null;
+                        $itemStandardPrice = 0;
                     }
 
                     $order->items()->create([
@@ -423,9 +424,11 @@ class SalesOrderController extends Controller
                 $taxRate = (float) ($item['tax_rate'] ?? 0);
                 $subtotal += $amount;
                 $taxAmount += $amount * $taxRate / 100;
-                $itemStandardPrice = $standardPrices[$item['product_id']] ?? null;
-                if ($itemStandardPrice !== null) {
-                    $standardTotal += (float) $item['quantity'] * (float) $itemStandardPrice;
+                $itemStandardPrice = (float) ($standardPrices[$item['product_id']] ?? 0);
+                if ($itemStandardPrice > 0) {
+                    $standardTotal += (float) $item['quantity'] * $itemStandardPrice;
+                } else {
+                    $itemStandardPrice = 0;
                 }
 
                 $salesOrder->items()->create([

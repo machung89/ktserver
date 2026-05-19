@@ -28,6 +28,7 @@ use App\Http\Controllers\Api\V1\TourController;
 use App\Http\Controllers\Api\V1\TourGuideAdvanceController;
 use App\Http\Controllers\Api\V1\TourPaymentController;
 use App\Http\Controllers\Api\V1\WarehouseController;
+use App\Http\Controllers\Api\V1\WarehouseExportController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -111,6 +112,15 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::put('warehouses/{warehouse}', [WarehouseController::class, 'update'])->middleware('permission:warehouses.edit');
         Route::delete('warehouses/{warehouse}', [WarehouseController::class, 'destroy'])->middleware('permission:warehouses.delete');
 
+        // Phiếu xuất kho
+        Route::middleware('permission:warehouse_exports.view')->group(function () {
+            Route::get('warehouse-exports', [WarehouseExportController::class, 'index']);
+            Route::get('warehouse-exports/{warehouseExport}', [WarehouseExportController::class, 'show']);
+        });
+        Route::post('warehouse-exports', [WarehouseExportController::class, 'store'])->middleware('permission:warehouse_exports.create');
+        Route::put('warehouse-exports/{warehouseExport}', [WarehouseExportController::class, 'update'])->middleware('permission:warehouse_exports.edit');
+        Route::delete('warehouse-exports/{warehouseExport}', [WarehouseExportController::class, 'destroy'])->middleware('permission:warehouse_exports.delete');
+
         // Danh mục — Đối tác
         Route::middleware('permission:companies.view')->group(function () {
             Route::get('companies', [CompanyController::class, 'index']);
@@ -159,6 +169,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         });
         Route::post('promotions', [PromotionController::class, 'store'])->middleware('permission:promotions.create');
         Route::put('promotions/{promotion}', [PromotionController::class, 'update'])->middleware('permission:promotions.edit');
+        Route::post('promotions/{promotion}/recalculate-orders', [PromotionController::class, 'recalculateOrders'])->middleware('permission:promotions.edit');
         Route::delete('promotions/{promotion}', [PromotionController::class, 'destroy'])->middleware('permission:promotions.delete');
 
         // Bán hàng

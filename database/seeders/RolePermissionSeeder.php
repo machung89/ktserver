@@ -72,7 +72,10 @@ class RolePermissionSeeder extends Seeder
                 ['promotions.edit', 'Sửa khuyến mại'],
                 ['promotions.delete', 'Xóa khuyến mại'],
             ],
-            'reports' => [['reports.view', 'Xem báo cáo']],
+            'reports' => [
+                ['reports.view', 'Xem báo cáo'],
+                ['reports.view_profit', 'Xem lợi nhuận / lời lỗ'],
+            ],
             'employees' => [
                 ['employees.view', 'Xem nhân viên'],
                 ['employees.create', 'Thêm nhân viên'],

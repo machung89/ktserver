@@ -228,8 +228,12 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('reports/sold-products', [ReportController::class, 'soldProducts']);
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance']);
             Route::get('reports/balance-sheet', [ReportController::class, 'balanceSheet']);
-            Route::get('reports/income-statement', [ReportController::class, 'incomeStatement']);
             Route::get('reports/sales-by-employee', [ReportController::class, 'salesByEmployee']);
+        });
+
+        // Báo cáo lợi nhuận / lời lỗ — yêu cầu thêm quyền view_profit
+        Route::middleware(['permission:reports.view', 'permission:reports.view_profit'])->group(function () {
+            Route::get('reports/income-statement', [ReportController::class, 'incomeStatement']);
         });
 
         // Ngân hàng (dữ liệu tham chiếu, không cần permission)

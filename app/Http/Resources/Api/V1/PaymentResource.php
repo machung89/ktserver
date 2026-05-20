@@ -25,6 +25,7 @@ class PaymentResource extends JsonResource
             'expense_account_id' => $this->expense_account_id,
             'company' => new CompanyResource($this->whenLoaded('company')),
             'account' => new AccountResource($this->whenLoaded('account')),
+            'to_account' => new AccountResource($this->whenLoaded('toAccount')),
             'expense_account' => new AccountResource($this->whenLoaded('expenseAccount')),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,

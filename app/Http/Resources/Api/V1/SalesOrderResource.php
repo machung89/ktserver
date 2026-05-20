@@ -29,6 +29,8 @@ class SalesOrderResource extends JsonResource
             'payment_status' => $this->payment_status,
             'paid_amount' => $this->paid_amount,
             'has_export' => (bool) ($this->warehouse_exports_exists ?? false),
+            'ref_id' => $this->ref_id,
+            'tracking_number' => $this->tracking_number,
             'notes' => $this->notes,
             'created_by' => $this->created_by,
             'created_by_name' => $this->whenLoaded('createdBy', fn () => $this->createdBy?->name),

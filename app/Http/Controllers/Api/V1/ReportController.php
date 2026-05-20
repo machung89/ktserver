@@ -12,6 +12,7 @@ use App\Models\Payment;
 use App\Models\PurchaseOrder;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -168,6 +169,21 @@ class ReportController extends Controller
         };
     }
 
+    private function canViewProfit(): bool
+    {
+        /** @var User|null $user */
+        $user = auth()->user();
+
+        return $user?->hasPermission('reports.view_profit') ?? false;
+    }
+
+    private function stripProfitFields(array $row): array
+    {
+        unset($row['cost'], $row['profit'], $row['margin'], $row['standard_total'], $row['employee_profit']);
+
+        return $row;
+    }
+
     private function salesGroupedByProduct(Request $request): JsonResponse
     {
         $items = SalesOrderItem::with(['product.category.parent', 'salesOrder'])
@@ -178,7 +194,9 @@ class ReportController extends Controller
             ->when($request->category_id, fn ($q, $v) => $q->whereHas('product', fn ($pq) => $pq->where('category_id', $v)))
             ->get();
 
-        $grouped = $items->groupBy('product_id')->map(function ($rows) {
+        $showProfit = $this->canViewProfit();
+
+        $grouped = $items->groupBy('product_id')->map(function ($rows) use ($showProfit) {
             $first = $rows->first();
             $product = $first->product;
             $qty = $rows->sum(fn ($r) => (float) $r->quantity);
@@ -195,7 +213,7 @@ class ReportController extends Controller
             $cost = round($cost, 2);
             $standardTotal = round($standardTotal, 2);
 
-            return [
+            $row = [
                 'product_code' => $product?->code ?? '',
                 'product_name' => $product?->name ?? '',
                 'unit' => $product?->unit ?? '',
@@ -208,6 +226,8 @@ class ReportController extends Controller
                 'standard_total' => $standardTotal,
                 'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : 0,
             ];
+
+            return $showProfit ? $row : $this->stripProfitFields($row);
         })
             ->filter(fn ($r) => $r['quantity'] != 0 || $r['revenue'] != 0)
             ->sortByDesc('revenue')
@@ -216,14 +236,17 @@ class ReportController extends Controller
         return response()->json([
             'data' => $grouped,
             'total_revenue' => round($grouped->sum('revenue'), 2),
-            'total_cost' => round($grouped->sum('cost'), 2),
-            'gross_profit' => round($grouped->sum('profit'), 2),
+            ...($showProfit ? [
+                'total_cost' => round($grouped->sum('cost'), 2),
+                'gross_profit' => round($grouped->sum('profit'), 2),
+            ] : []),
         ]);
     }
 
     private function salesGroupedByDate(Request $request): JsonResponse
     {
         $orgId = $this->orgId();
+        $showProfit = $this->canViewProfit();
 
         $rows = DB::table('sales_orders as so')
             ->leftJoin('sales_order_items as soi', function ($j) {
@@ -243,13 +266,13 @@ class ReportController extends Controller
             ])
             ->orderBy(DB::raw('DATE(so.order_date)'))
             ->get()
-            ->map(function ($r) {
+            ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);
                 $cost = round((float) $r->cost, 2);
                 $profit = round($revenue - $cost, 2);
                 $standardTotal = round((float) $r->standard_total, 2);
 
-                return [
+                $row = [
                     'date' => $r->date,
                     'order_count' => (int) $r->order_count,
                     'revenue' => $revenue,
@@ -259,19 +282,24 @@ class ReportController extends Controller
                     'standard_total' => $standardTotal,
                     'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
                 ];
+
+                return $showProfit ? $row : $this->stripProfitFields($row);
             });
 
         return response()->json([
             'data' => $rows,
             'total_revenue' => round($rows->sum('revenue'), 2),
-            'total_cost' => round($rows->sum('cost'), 2),
-            'gross_profit' => round($rows->sum('profit'), 2),
+            ...($showProfit ? [
+                'total_cost' => round($rows->sum('cost'), 2),
+                'gross_profit' => round($rows->sum('profit'), 2),
+            ] : []),
         ]);
     }
 
     private function salesGroupedByCategory(Request $request): JsonResponse
     {
         $orgId = $this->orgId();
+        $showProfit = $this->canViewProfit();
 
         $rows = DB::table('sales_order_items as soi')
             ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
@@ -294,13 +322,13 @@ class ReportController extends Controller
             ])
             ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
             ->get()
-            ->map(function ($r) {
+            ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);
                 $cost = round((float) $r->cost, 2);
                 $profit = round($revenue - $cost, 2);
                 $standardTotal = round((float) $r->standard_total, 2);
 
-                return [
+                $row = [
                     'category_name' => $r->category_name,
                     'quantity' => round((float) $r->quantity, 3),
                     'order_count' => (int) $r->order_count,
@@ -311,13 +339,17 @@ class ReportController extends Controller
                     'standard_total' => $standardTotal,
                     'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
                 ];
+
+                return $showProfit ? $row : $this->stripProfitFields($row);
             });
 
         return response()->json([
             'data' => $rows,
             'total_revenue' => round($rows->sum('revenue'), 2),
-            'total_cost' => round($rows->sum('cost'), 2),
-            'gross_profit' => round($rows->sum('profit'), 2),
+            ...($showProfit ? [
+                'total_cost' => round($rows->sum('cost'), 2),
+                'gross_profit' => round($rows->sum('profit'), 2),
+            ] : []),
         ]);
     }
 
@@ -635,6 +667,7 @@ class ReportController extends Controller
     public function salesByEmployee(Request $request): JsonResponse
     {
         $orgId = $this->orgId();
+        $showProfit = $this->canViewProfit();
 
         $rows = DB::table('sales_orders as so')
             ->join('users as u', 'u.id', '=', 'so.created_by')
@@ -658,13 +691,13 @@ class ReportController extends Controller
             ])
             ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
             ->get()
-            ->map(function ($r) {
+            ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);
                 $cost = round((float) $r->cost, 2);
                 $profit = round($revenue - $cost, 2);
                 $standardTotal = round((float) $r->standard_total, 2);
 
-                return [
+                $row = [
                     'user_id' => $r->user_id,
                     'name' => $r->name,
                     'department' => $r->department,
@@ -677,13 +710,17 @@ class ReportController extends Controller
                     'standard_total' => $standardTotal,
                     'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
                 ];
+
+                return $showProfit ? $row : $this->stripProfitFields($row);
             });
 
         return response()->json([
             'data' => $rows,
             'total_revenue' => round($rows->sum('revenue'), 2),
-            'total_cost' => round($rows->sum('cost'), 2),
-            'gross_profit' => round($rows->sum('profit'), 2),
+            ...($showProfit ? [
+                'total_cost' => round($rows->sum('cost'), 2),
+                'gross_profit' => round($rows->sum('profit'), 2),
+            ] : []),
         ]);
     }
 

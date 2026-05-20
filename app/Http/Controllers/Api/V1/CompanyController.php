@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\CompanyResource;
 use App\Models\Company;
+use App\Models\SalesOrder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -20,8 +21,17 @@ class CompanyController extends Controller
     public function index(Request $request): AnonymousResourceCollection
     {
         $companies = Company::with(['assignedUser', 'bank'])
+            ->when($request->boolean('with_balance'), fn ($q) => $q->addSelect([
+                'receivable_balance' => SalesOrder::selectRaw('COALESCE(SUM(total_amount) - SUM(paid_amount), 0)')
+                    ->whereColumn('company_id', 'companies.id')
+                    ->whereIn('status', ['confirmed', 'shipping', 'completed']),
+            ]))
             ->when($request->type, fn ($q, $v) => $q->where('type', $v))
-            ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('tax_code', 'like', "%{$v}%"))
+            ->when($request->search, fn ($q, $v) => $q->where(function ($q) use ($v) {
+                $q->where('name', 'like', "%{$v}%")
+                    ->orWhere('phone', 'like', "%{$v}%")
+                    ->orWhere('address', 'like', "%{$v}%");
+            }))
             ->paginate(min((int) $request->input('per_page', 20), 500));
 
         return CompanyResource::collection($companies);

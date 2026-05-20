@@ -36,6 +36,10 @@ class CompanyResource extends JsonResource
                 'logo' => $this->bank->logo,
                 'bin' => $this->bank->bin,
             ]),
+            'receivable_balance' => $this->when(
+                array_key_exists('receivable_balance', $this->resource->getAttributes()),
+                fn () => max(0, (float) ($this->receivable_balance ?? 0))
+            ),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

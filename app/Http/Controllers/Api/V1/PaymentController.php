@@ -25,7 +25,7 @@ class PaymentController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $payments = Payment::with(['company.bank', 'account', 'expenseAccount'])
+        $payments = Payment::with(['company.bank', 'account', 'toAccount', 'expenseAccount'])
             ->when($request->type, fn ($q, $v) => $q->where('type', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))

@@ -36,6 +36,15 @@ class SalesOrderResource extends JsonResource
             'created_by_name' => $this->whenLoaded('createdBy', fn () => $this->createdBy?->name),
             'company' => new CompanyResource($this->whenLoaded('company')),
             'items' => SalesOrderItemResource::collection($this->whenLoaded('items')),
+            'payments' => $this->whenLoaded('payments', fn () => $this->payments->map(fn ($p) => [
+                'id' => $p->id,
+                'payment_number' => $p->payment_number,
+                'payment_date' => $p->payment_date,
+                'amount' => (float) $p->amount,
+                'description' => $p->description,
+                'account_name' => $p->account?->name,
+                'status' => $p->status,
+            ])),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

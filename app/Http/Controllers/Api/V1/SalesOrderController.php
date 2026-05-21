@@ -324,7 +324,7 @@ class SalesOrderController extends Controller
             abort(403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
-        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse']));
+        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource

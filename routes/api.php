@@ -24,6 +24,7 @@ use App\Http\Controllers\Api\V1\RestaurantTableController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\SalesOrderController;
 use App\Http\Controllers\Api\V1\ShopeeImportController;
+use App\Http\Controllers\Api\V1\TiktokImportController;
 use App\Http\Controllers\Api\V1\TourController;
 use App\Http\Controllers\Api\V1\TourGuideAdvanceController;
 use App\Http\Controllers\Api\V1\TourPaymentController;
@@ -181,6 +182,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('sales', [SalesOrderController::class, 'store'])->middleware('permission:sales.create');
         Route::post('sales/import', [SalesOrderController::class, 'bulkImport'])->middleware('permission:sales.create');
         Route::post('sales/shopee-import', [ShopeeImportController::class, 'import'])->middleware('permission:sales.create');
+        Route::post('sales/tiktok-import', [TiktokImportController::class, 'import'])->middleware('permission:sales.create');
         Route::put('sales/{salesOrder}', [SalesOrderController::class, 'update'])->middleware('permission:sales.edit');
         Route::post('sales/bulk-confirm', [SalesOrderController::class, 'bulkConfirm'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/confirm', [SalesOrderController::class, 'confirm'])->middleware('permission:sales.confirm');

@@ -35,10 +35,11 @@ class SalesOrderController extends Controller
         /** @var User $user */
         $user = Auth::user();
         $canViewAll = $user->hasPermission('sales.view_all');
+        $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
 
         $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable'])
             ->withExists('warehouseExports')
-            ->when(! $canViewAll, fn ($q) => $q->where('created_by', Auth::id()))
+            ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->search, function ($q, $v) {
@@ -66,7 +67,8 @@ class SalesOrderController extends Controller
         /** @var User $user */
         $user = Auth::user();
         $canViewAll = $user->hasPermission('sales.view_all');
-        $base = SalesOrder::when(! $canViewAll, fn ($q) => $q->where('created_by', Auth::id()));
+        $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
+        $base = SalesOrder::when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter));
 
         $counts = (clone $base)->selectRaw('status, COUNT(*) as cnt')
             ->groupBy('status')
@@ -320,8 +322,9 @@ class SalesOrderController extends Controller
     {
         /** @var User $user */
         $user = Auth::user();
-        if (! $user->hasPermission('sales.view_all') && $salesOrder->created_by !== $user->id) {
-            abort(403, 'Bạn không có quyền xem đơn hàng này.');
+        if (! $user->hasPermission('sales.view_all')) {
+            $viewableIds = array_merge([$user->id], $user->getViewableUserIds());
+            abort_unless(in_array($salesOrder->created_by, $viewableIds), 403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
         return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account']));

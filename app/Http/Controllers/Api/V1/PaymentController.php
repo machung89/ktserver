@@ -9,6 +9,8 @@ use App\Http\Resources\Api\V1\PaymentResource;
 use App\Models\JournalEntry;
 use App\Models\Payment;
 use App\Models\Tour;
+use App\Models\TourPaymentRequest;
+use App\Models\TourService;
 use App\Services\PaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -137,6 +139,41 @@ class PaymentController extends Controller
                 Tour::withoutGlobalScopes()
                     ->where('id', $payment->reference_id)
                     ->decrement('paid_amount', (float) $payment->amount);
+            }
+
+            // Hoàn lệnh thanh toán tour về trạng thái chờ duyệt khi xóa phiếu liên kết
+            if ($payment->reference_type === TourPaymentRequest::class && $payment->reference_id) {
+                $paymentRequest = TourPaymentRequest::withoutGlobalScopes()->find($payment->reference_id);
+
+                if ($paymentRequest && $paymentRequest->status === 'approved') {
+                    $wasActuallyPaid = $payment->status === 'approved';
+
+                    if ($wasActuallyPaid && $paymentRequest->service) {
+                        $paymentRequest->service->decrement('paid_amount', (float) $paymentRequest->amount);
+                    }
+
+                    if (in_array($paymentRequest->request_type, ['settlement', 'settlement_receipt'])) {
+                        if ($wasActuallyPaid) {
+                            TourService::where('tour_id', $paymentRequest->tour_id)
+                                ->where('service_stage', 'operating')
+                                ->where('guide_paid_amount', '>', 0)
+                                ->each(fn ($s) => $s->decrement('paid_amount', (float) $s->guide_paid_amount));
+                        }
+                        TourService::where('tour_id', $paymentRequest->tour_id)
+                            ->where('service_stage', 'settlement')
+                            ->update(['paid_amount' => 0]);
+                        $paymentRequest->tour?->update(['stage' => 'operating']);
+                    } elseif ($paymentRequest->request_type === 'guide_advance') {
+                        $paymentRequest->tour?->update(['stage' => 'quote']);
+                    }
+
+                    $paymentRequest->update([
+                        'status' => 'pending',
+                        'payment_id' => null,
+                        'approved_by' => null,
+                        'approved_at' => null,
+                    ]);
+                }
             }
 
             $payment->delete();

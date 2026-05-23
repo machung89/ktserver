@@ -279,27 +279,40 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::delete('roles/{role}', [RoleController::class, 'destroy'])->middleware('permission:roles.delete');
 
         // Tour du lịch
-        Route::get('tours', [TourController::class, 'index']);
-        Route::post('tours', [TourController::class, 'store']);
-        Route::get('tours/{tour}', [TourController::class, 'show']);
-        Route::put('tours/{tour}', [TourController::class, 'update']);
-        Route::post('tours/{tour}/confirm', [TourController::class, 'confirm']);
-        Route::post('tours/{tour}/complete', [TourController::class, 'complete']);
-        Route::post('tours/{tour}/cancel', [TourController::class, 'cancel']);
-        Route::post('tours/{tour}/collect', [TourController::class, 'collect']);
-        Route::delete('tours/{tour}', [TourController::class, 'destroy']);
+        Route::middleware('permission:tours.view')->group(function () {
+            Route::get('tours', [TourController::class, 'index']);
+            Route::get('tours/{tour}', [TourController::class, 'show']);
+        });
+        Route::post('tours', [TourController::class, 'store'])->middleware('permission:tours.quote');
+        Route::put('tours/{tour}', [TourController::class, 'update'])->middleware('permission:tours.quote');
+        Route::delete('tours/{tour}', [TourController::class, 'destroy'])->middleware('permission:tours.quote');
+        Route::post('tours/{tour}/confirm', [TourController::class, 'confirm'])->middleware('permission:tours.confirm');
+        Route::post('tours/{tour}/complete', [TourController::class, 'complete'])->middleware('permission:tours.confirm');
+        Route::post('tours/{tour}/cancel', [TourController::class, 'cancel'])->middleware('permission:tours.cancel');
+        Route::post('tours/{tour}/collect', [TourController::class, 'collect'])->middleware('permission:tours.confirm');
+        Route::post('tours/{tour}/operate', [TourController::class, 'operate'])->middleware('permission:tours.operate');
+        Route::post('tours/{tour}/settle', [TourController::class, 'settle'])->middleware('permission:tours.settle');
+
+        // Thu phát sinh khách hàng
+        Route::middleware('permission:tours.operate')->group(function () {
+            Route::post('tours/{tour}/extra-revenues', [TourController::class, 'storeExtraRevenue']);
+            Route::put('tour-extra-revenues/{extraRevenue}', [TourController::class, 'updateExtraRevenue']);
+            Route::delete('tour-extra-revenues/{extraRevenue}', [TourController::class, 'destroyExtraRevenue']);
+        });
 
         // Tạm ứng hướng dẫn viên
-        Route::get('tours/{tour}/guide-advances', [TourGuideAdvanceController::class, 'index']);
-        Route::post('tours/{tour}/guide-advances', [TourGuideAdvanceController::class, 'store']);
-        Route::delete('tour-guide-advances/{tourGuideAdvance}', [TourGuideAdvanceController::class, 'destroy'])->middleware('permission:payments.delete');
+        Route::get('tours/{tour}/guide-advances', [TourGuideAdvanceController::class, 'index'])->middleware('permission:tours.view');
+        Route::post('tours/{tour}/guide-advances', [TourGuideAdvanceController::class, 'store'])->middleware('permission:tours.operate');
+        Route::delete('tour-guide-advances/{tourGuideAdvance}', [TourGuideAdvanceController::class, 'destroy'])->middleware('permission:tours.operate');
 
         // Phiếu thanh toán dịch vụ tour
-        Route::get('tour-payments', [TourPaymentController::class, 'index']);
-        Route::post('tour-payments', [TourPaymentController::class, 'store']);
-        Route::get('tour-payments/supplier-advance-balance', [TourPaymentController::class, 'supplierAdvanceBalance']);
-        Route::post('tour-payments/{tourPayment}/approve', [TourPaymentController::class, 'approve']);
-        Route::post('tour-payments/{tourPayment}/reject', [TourPaymentController::class, 'reject']);
-        Route::delete('tour-payments/{tourPayment}', [TourPaymentController::class, 'destroy'])->middleware('permission:payments.delete');
+        Route::middleware('permission:tours.view')->group(function () {
+            Route::get('tour-payments', [TourPaymentController::class, 'index']);
+            Route::get('tour-payments/supplier-advance-balance', [TourPaymentController::class, 'supplierAdvanceBalance']);
+        });
+        Route::post('tour-payments', [TourPaymentController::class, 'store'])->middleware('permission:tours.payment_request');
+        Route::post('tour-payments/{tourPayment}/approve', [TourPaymentController::class, 'approve'])->middleware('permission:tours.payment_approve');
+        Route::post('tour-payments/{tourPayment}/reject', [TourPaymentController::class, 'reject'])->middleware('permission:tours.payment_approve');
+        Route::delete('tour-payments/{tourPayment}', [TourPaymentController::class, 'destroy'])->middleware('permission:tours.payment_approve');
     });
 });

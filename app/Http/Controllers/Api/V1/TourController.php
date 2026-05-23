@@ -6,9 +6,11 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Models\Payment;
 use App\Models\Tour;
+use App\Models\TourExtraRevenue;
 use App\Models\TourGuideAdvance;
 use App\Models\TourPaymentRequest;
 use App\Models\TourService;
+use App\Models\User;
 use App\Services\PaymentService;
 use App\Services\TourService as TourServiceClass;
 use Illuminate\Http\JsonResponse;
@@ -28,9 +30,15 @@ class TourController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        /** @var User $user */
+        $user = Auth::user();
+        $canViewAll = $user->hasPermission('tours.view_all');
+        $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
+
         $tours = Tour::with(['customer', 'createdBy'])
-            ->withSum('services as services_cost_total', 'cost')
-            ->withSum('services as services_paid_total', 'paid_amount')
+            ->withSum(['services as services_cost_total' => fn ($q) => $q->where('service_stage', 'operating')], 'cost')
+            ->withSum(['services as services_paid_total' => fn ($q) => $q->whereIn('service_stage', ['operating', 'settlement'])], 'paid_amount')
+            ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->search, function ($q, $v) {
                 $q->where(function ($q) use ($v) {
@@ -75,6 +83,8 @@ class TourController extends Controller
             'services.*.quantity' => ['nullable', 'integer', 'min:1'],
             'services.*.days' => ['nullable', 'integer', 'min:1'],
             'services.*.paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.advance_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.notes' => ['nullable', 'string'],
         ]);
 
@@ -109,12 +119,22 @@ class TourController extends Controller
             return $tour;
         });
 
-        return response()->json(['data' => $this->format($tour->load(['customer', 'createdBy', 'services.supplier']))], 201);
+        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $this->loadPaymentHistory($tour);
+
+        return response()->json(['data' => $this->format($tour)], 201);
     }
 
     public function show(Tour $tour): JsonResponse
     {
-        $tour->load(['customer', 'createdBy', 'services.supplier',
+        /** @var User $user */
+        $user = Auth::user();
+        if (! $user->hasPermission('tours.view_all')) {
+            $viewableIds = array_merge([Auth::id()], $user->getViewableUserIds());
+            abort_unless(in_array($tour->created_by, $viewableIds), 403, 'Bạn không có quyền xem tour này.');
+        }
+
+        $tour->load(['customer', 'createdBy', 'services.supplier', 'extraRevenues',
             'services' => fn ($q) => $q->withSum(['paymentRequests as pending_amount' => fn ($q) => $q->where('status', 'pending')], 'amount'),
         ]);
         $this->loadPaymentHistory($tour);
@@ -143,6 +163,8 @@ class TourController extends Controller
             'services.*.quantity' => ['nullable', 'integer', 'min:1'],
             'services.*.days' => ['nullable', 'integer', 'min:1'],
             'services.*.paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.advance_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.notes' => ['nullable', 'string'],
         ]);
 
@@ -207,7 +229,196 @@ class TourController extends Controller
             }
         });
 
-        return response()->json(['data' => $this->format($tour->load(['customer', 'createdBy', 'services.supplier']))]);
+        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $this->loadPaymentHistory($tour);
+
+        return response()->json(['data' => $this->format($tour)]);
+    }
+
+    public function operate(Request $request, Tour $tour): JsonResponse
+    {
+        abort_unless(in_array($tour->stage, ['quote', 'operating']), 422, 'Tour không ở giai đoạn có thể điều hành.');
+
+        $validated = $request->validate([
+            'services' => ['nullable', 'array'],
+            'services.*.id' => ['nullable', 'exists:tour_services,id'],
+            'services.*.service_type' => ['required', 'string'],
+            'services.*.name' => ['required', 'string', 'max:255'],
+            'services.*.supplier_id' => ['nullable', 'exists:companies,id'],
+            'services.*.unit_price' => ['nullable', 'numeric', 'min:0'],
+            'services.*.quantity' => ['nullable', 'integer', 'min:1'],
+            'services.*.days' => ['nullable', 'integer', 'min:1'],
+            'services.*.advance_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.notes' => ['nullable', 'string'],
+            'extra_revenues' => ['nullable', 'array'],
+            'extra_revenues.*.id' => ['nullable', 'exists:tour_extra_revenues,id'],
+            'extra_revenues.*.name' => ['required', 'string', 'max:255'],
+            'extra_revenues.*.quantity' => ['nullable', 'integer', 'min:1'],
+            'extra_revenues.*.unit_price' => ['nullable', 'numeric', 'min:0'],
+            'extra_revenues.*.notes' => ['nullable', 'string'],
+        ]);
+
+        DB::transaction(function () use ($tour, $validated) {
+            $incomingIds = collect($validated['services'] ?? [])->pluck('id')->filter()->all();
+
+            $hasApprovedAdvance = $tour->paymentRequests()
+                ->where('request_type', 'guide_advance')
+                ->where('status', 'approved')
+                ->exists();
+
+            $tour->services()
+                ->whereNotIn('id', $incomingIds)
+                ->where('paid_amount', 0)
+                ->where('service_stage', 'quote')
+                ->delete();
+
+            foreach ($validated['services'] ?? [] as $svc) {
+                if (! empty($svc['id'])) {
+                    if (($svc['service_stage'] ?? 'quote') === 'quote') {
+                        $updateData = ['supplier_id' => $svc['supplier_id'] ?? null];
+                        if (! $hasApprovedAdvance) {
+                            $updateData['advance_amount'] = (float) ($svc['advance_amount'] ?? 0);
+                        }
+                        TourService::where('id', $svc['id'])->update($updateData);
+                    } else {
+                        $data = $this->buildServiceData($svc);
+                        if ($hasApprovedAdvance) {
+                            unset($data['advance_amount']);
+                        }
+                        TourService::where('id', $svc['id'])->update($data);
+                    }
+                } else {
+                    $newData = array_merge(
+                        $this->buildServiceData($svc),
+                        ['service_stage' => 'operating']
+                    );
+                    if ($hasApprovedAdvance) {
+                        $newData['advance_amount'] = 0;
+                    }
+                    $tour->services()->create($newData);
+                }
+            }
+
+            $this->syncExtraRevenues($tour, $validated['extra_revenues'] ?? []);
+
+            $tour->update(['stage' => 'operating']);
+
+            if (! $hasApprovedAdvance) {
+                $totalAdvance = $tour->services()->where('service_stage', 'operating')->sum('advance_amount');
+                $tour->paymentRequests()
+                    ->where('request_type', 'guide_advance')
+                    ->where('status', 'pending')
+                    ->delete();
+
+                if ($totalAdvance > 0.01) {
+                    TourPaymentRequest::create([
+                        'organization_id' => $tour->organization_id,
+                        'tour_id' => $tour->id,
+                        'tour_service_id' => null,
+                        'request_type' => 'guide_advance',
+                        'amount' => $totalAdvance,
+                        'status' => 'pending',
+                        'notes' => "Dự chi HĐV tour {$tour->tour_number}",
+                        'requested_by' => Auth::id(),
+                    ]);
+                }
+            }
+        });
+
+        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
+        $this->loadPaymentHistory($fresh);
+
+        return response()->json(['data' => $this->format($fresh)]);
+    }
+
+    public function settle(Request $request, Tour $tour): JsonResponse
+    {
+        abort_unless(in_array($tour->stage, ['operating', 'settling']), 422, 'Tour chưa qua giai đoạn điều hành.');
+
+        $validated = $request->validate([
+            'services' => ['nullable', 'array'],
+            'services.*.id' => ['nullable', 'exists:tour_services,id'],
+            'services.*.service_type' => ['required', 'string'],
+            'services.*.name' => ['required', 'string', 'max:255'],
+            'services.*.supplier_id' => ['nullable', 'exists:companies,id'],
+            'services.*.unit_price' => ['nullable', 'numeric', 'min:0'],
+            'services.*.quantity' => ['nullable', 'integer', 'min:1'],
+            'services.*.days' => ['nullable', 'integer', 'min:1'],
+            'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.notes' => ['nullable', 'string'],
+            'extra_revenues' => ['nullable', 'array'],
+            'extra_revenues.*.id' => ['nullable', 'exists:tour_extra_revenues,id'],
+            'extra_revenues.*.name' => ['required', 'string', 'max:255'],
+            'extra_revenues.*.quantity' => ['nullable', 'integer', 'min:1'],
+            'extra_revenues.*.unit_price' => ['nullable', 'numeric', 'min:0'],
+            'extra_revenues.*.notes' => ['nullable', 'string'],
+        ]);
+
+        DB::transaction(function () use ($tour, $validated) {
+            $incomingIds = collect($validated['services'] ?? [])->pluck('id')->filter()->all();
+
+            $tour->services()
+                ->whereNotIn('id', $incomingIds)
+                ->where('paid_amount', 0)
+                ->where('service_stage', 'settlement')
+                ->delete();
+
+            foreach ($validated['services'] ?? [] as $svc) {
+                $guidePaid = (float) ($svc['guide_paid_amount'] ?? 0);
+                $isSettlement = ($svc['service_stage'] ?? '') === 'settlement';
+
+                if (! empty($svc['id'])) {
+                    $updateData = ['guide_paid_amount' => $guidePaid];
+                    if ($isSettlement) {
+                        $updateData['paid_amount'] = $guidePaid;
+                    }
+                    TourService::where('id', $svc['id'])->update($updateData);
+                } else {
+                    $data = array_merge(
+                        $this->buildServiceData($svc),
+                        ['service_stage' => 'settlement']
+                    );
+                    // Dịch vụ phát sinh: guide đã trả trực tiếp
+                    $data['paid_amount'] = $guidePaid;
+                    $tour->services()->create($data);
+                }
+            }
+
+            $this->syncExtraRevenues($tour, $validated['extra_revenues'] ?? []);
+
+            $tour->update(['stage' => 'settling']);
+
+            $totalAdvance = $tour->services()->where('service_stage', 'operating')->sum('advance_amount');
+            $totalGuidePaid = $tour->services()->sum('guide_paid_amount');
+            $net = (float) $totalGuidePaid - (float) $totalAdvance;
+
+            $tour->paymentRequests()
+                ->whereIn('request_type', ['settlement', 'settlement_receipt'])
+                ->where('status', 'pending')
+                ->delete();
+
+            if (abs($net) > 0.01) {
+                // net > 0: guide chi nhiều hơn tạm ứng → phiếu chi bổ sung
+                // net < 0: guide còn thừa tiền → phiếu thu hoàn lại
+                TourPaymentRequest::create([
+                    'organization_id' => $tour->organization_id,
+                    'tour_id' => $tour->id,
+                    'tour_service_id' => null,
+                    'request_type' => $net > 0 ? 'settlement' : 'settlement_receipt',
+                    'amount' => abs($net),
+                    'status' => 'pending',
+                    'notes' => $net > 0
+                        ? "Quyết toán HĐV tour {$tour->tour_number} (chi bổ sung)"
+                        : "Quyết toán HĐV tour {$tour->tour_number} (thu hoàn thừa)",
+                    'requested_by' => Auth::id(),
+                ]);
+            }
+        });
+
+        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
+        $this->loadPaymentHistory($fresh);
+
+        return response()->json(['data' => $this->format($fresh)]);
     }
 
     public function confirm(Tour $tour): JsonResponse
@@ -216,7 +427,10 @@ class TourController extends Controller
 
         $tour = $this->tourService->confirm($tour);
 
-        return response()->json(['data' => $this->format($tour->load(['customer', 'createdBy', 'services.supplier']))]);
+        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $this->loadPaymentHistory($tour);
+
+        return response()->json(['data' => $this->format($tour)]);
     }
 
     public function complete(Tour $tour): JsonResponse
@@ -224,7 +438,10 @@ class TourController extends Controller
         abort_unless($tour->status === 'confirmed', 422, 'Chỉ có thể hoàn thành tour đã xác nhận.');
         $tour->update(['status' => 'completed']);
 
-        return response()->json(['data' => $this->format($tour->load(['customer', 'createdBy', 'services.supplier']))]);
+        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $this->loadPaymentHistory($tour);
+
+        return response()->json(['data' => $this->format($tour)]);
     }
 
     public function cancel(Tour $tour): JsonResponse
@@ -232,7 +449,10 @@ class TourController extends Controller
         abort_unless(in_array($tour->status, ['draft', 'confirmed']), 422, 'Không thể hủy tour ở trạng thái này.');
         $tour->update(['status' => 'cancelled']);
 
-        return response()->json(['data' => $this->format($tour->load(['customer', 'createdBy', 'services.supplier']))]);
+        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $this->loadPaymentHistory($tour);
+
+        return response()->json(['data' => $this->format($tour)]);
     }
 
     public function collect(Request $request, Tour $tour): JsonResponse
@@ -280,10 +500,76 @@ class TourController extends Controller
             $tourLocked->increment('paid_amount', (float) $validated['amount']);
         });
 
-        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier']);
+        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
         return response()->json(['data' => $this->format($fresh)]);
+    }
+
+    public function storeExtraRevenue(Request $request, Tour $tour): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'quantity' => ['nullable', 'integer', 'min:1'],
+            'unit_price' => ['nullable', 'numeric', 'min:0'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $qty = (int) ($validated['quantity'] ?? 1) ?: 1;
+        $unitPrice = (float) ($validated['unit_price'] ?? 0);
+
+        $item = $tour->extraRevenues()->create([
+            'organization_id' => $tour->organization_id,
+            'name' => $validated['name'],
+            'quantity' => $qty,
+            'unit_price' => $unitPrice,
+            'amount' => $qty * $unitPrice,
+            'notes' => $validated['notes'] ?? null,
+        ]);
+
+        $tour->increment('extra_revenues_total', $item->amount);
+
+        return response()->json(['data' => $this->formatExtraRevenue($item)], 201);
+    }
+
+    public function updateExtraRevenue(Request $request, TourExtraRevenue $extraRevenue): JsonResponse
+    {
+        abort_unless($extraRevenue->tour->organization_id === $this->orgId(), 403);
+
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'quantity' => ['nullable', 'integer', 'min:1'],
+            'unit_price' => ['nullable', 'numeric', 'min:0'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $qty = (int) ($validated['quantity'] ?? 1) ?: 1;
+        $unitPrice = (float) ($validated['unit_price'] ?? 0);
+
+        $extraRevenue->update([
+            'name' => $validated['name'],
+            'quantity' => $qty,
+            'unit_price' => $unitPrice,
+            'amount' => $qty * $unitPrice,
+            'notes' => $validated['notes'] ?? null,
+        ]);
+
+        $extraRevenue->tour->update([
+            'extra_revenues_total' => $extraRevenue->tour->extraRevenues()->sum('amount'),
+        ]);
+
+        return response()->json(['data' => $this->formatExtraRevenue($extraRevenue)]);
+    }
+
+    public function destroyExtraRevenue(TourExtraRevenue $extraRevenue): JsonResponse
+    {
+        abort_unless($extraRevenue->tour->organization_id === $this->orgId(), 403);
+
+        $tour = $extraRevenue->tour;
+        $extraRevenue->delete();
+        $tour->decrement('extra_revenues_total', $extraRevenue->amount);
+
+        return response()->json(null, 204);
     }
 
     public function destroy(Tour $tour): JsonResponse
@@ -311,13 +597,58 @@ class TourController extends Controller
             'child_price' => $tour->child_price,
             'total_amount' => $tour->total_amount,
             'paid_amount' => $tour->paid_amount,
-            'receivable' => max(0, (float) $tour->total_amount - (float) $tour->paid_amount),
+            'receivable' => max(0, (float) $tour->total_amount + (float) $tour->extra_revenues_total - (float) $tour->paid_amount),
             'services_cost' => (float) ($tour->services_cost_total ?? $tour->services?->sum(fn ($s) => (float) $s->cost) ?? 0),
             'services_paid' => (float) ($tour->services_paid_total ?? $tour->services?->sum(fn ($s) => (float) $s->paid_amount) ?? 0),
             'payable' => max(0, (float) ($tour->services_cost_total ?? 0) - (float) ($tour->services_paid_total ?? 0)),
+            'extra_revenues_total' => (float) $tour->extra_revenues_total,
             'status' => $tour->status,
+            'stage' => $tour->stage ?? 'quote',
             'created_by_name' => $tour->createdBy?->name,
         ];
+    }
+
+    /** @return array<string, mixed> */
+    private function formatExtraRevenue(TourExtraRevenue $r): array
+    {
+        return [
+            'id' => $r->id,
+            'tour_id' => $r->tour_id,
+            'name' => $r->name,
+            'quantity' => (int) $r->quantity,
+            'unit_price' => (float) $r->unit_price,
+            'amount' => (float) $r->amount,
+            'notes' => $r->notes,
+        ];
+    }
+
+    private function syncExtraRevenues(Tour $tour, array $items): void
+    {
+        $incomingIds = collect($items)->pluck('id')->filter()->all();
+
+        $tour->extraRevenues()->whereNotIn('id', $incomingIds)->delete();
+
+        foreach ($items as $item) {
+            $qty = (int) ($item['quantity'] ?? 1) ?: 1;
+            $unitPrice = (float) ($item['unit_price'] ?? 0);
+            $data = [
+                'name' => $item['name'],
+                'quantity' => $qty,
+                'unit_price' => $unitPrice,
+                'amount' => $qty * $unitPrice,
+                'notes' => $item['notes'] ?? null,
+            ];
+
+            if (! empty($item['id'])) {
+                TourExtraRevenue::where('id', $item['id'])->update($data);
+            } else {
+                $tour->extraRevenues()->create(array_merge($data, [
+                    'organization_id' => $tour->organization_id,
+                ]));
+            }
+        }
+
+        $tour->update(['extra_revenues_total' => $tour->extraRevenues()->sum('amount')]);
     }
 
     private function loadPaymentHistory(Tour $tour): void
@@ -332,6 +663,7 @@ class TourController extends Controller
         $tour->servicePayments = TourPaymentRequest::with(['service', 'payment.account'])
             ->where('tour_id', $tour->id)
             ->whereIn('status', ['approved'])
+            ->whereHas('payment')
             ->orderBy('approved_at')
             ->get();
 
@@ -344,8 +676,12 @@ class TourController extends Controller
     /** @return array<string, mixed> */
     private function format(Tour $tour): array
     {
-        $servicesCost = $tour->services->sum(fn ($s) => (float) $s->cost);
-        $servicesPaid = $tour->services->sum(fn ($s) => (float) $s->paid_amount);
+        $operatingServices = $tour->services->where('service_stage', 'operating');
+        $servicesCost = ($operatingServices->isNotEmpty() ? $operatingServices : $tour->services)->sum(fn ($s) => (float) $s->cost);
+        $paidServices = $operatingServices->isNotEmpty()
+            ? $tour->services->whereIn('service_stage', ['operating', 'settlement'])
+            : $tour->services;
+        $servicesPaid = $paidServices->sum(fn ($s) => (float) $s->paid_amount);
 
         $tour->services_cost_total = $servicesCost;
         $tour->services_paid_total = $servicesPaid;
@@ -353,9 +689,17 @@ class TourController extends Controller
         $customerPayments = $tour->customerPayments ?? collect();
         $servicePayments = $tour->servicePayments ?? collect();
         $guideAdvances = $tour->guideAdvances ?? collect();
+        $extraRevenues = $tour->extraRevenues ?? collect();
+
+        $guideAdvanceApproved = TourPaymentRequest::withoutGlobalScopes()
+            ->where('tour_id', $tour->id)
+            ->where('request_type', 'guide_advance')
+            ->where('status', 'approved')
+            ->exists();
 
         return array_merge($this->formatList($tour), [
             'notes' => $tour->notes,
+            'guide_advance_approved' => $guideAdvanceApproved,
             'customer_payments' => $customerPayments->map(fn ($p) => [
                 'id' => $p->id,
                 'payment_number' => $p->payment_number,
@@ -366,6 +710,7 @@ class TourController extends Controller
             ])->values(),
             'service_payments' => $servicePayments->map(fn ($p) => [
                 'id' => $p->id,
+                'request_type' => $p->request_type ?? 'service',
                 'service_name' => $p->service?->name,
                 'amount' => $p->amount,
                 'notes' => $p->notes,
@@ -387,6 +732,14 @@ class TourController extends Controller
                 'advance_date' => $a->advance_date?->toDateString(),
                 'notes' => $a->notes,
             ])->values(),
+            'extra_revenues' => $extraRevenues->map(fn ($r) => [
+                'id' => $r->id,
+                'name' => $r->name,
+                'quantity' => (int) $r->quantity,
+                'unit_price' => (float) $r->unit_price,
+                'amount' => (float) $r->amount,
+                'notes' => $r->notes,
+            ])->values(),
             'services' => $tour->services->map(fn ($s) => [
                 'id' => $s->id,
                 'service_type' => $s->service_type,
@@ -402,7 +755,10 @@ class TourController extends Controller
                 'days' => $s->days,
                 'cost' => $s->cost,
                 'paid_amount' => $s->paid_amount,
+                'advance_amount' => (float) ($s->advance_amount ?? 0),
+                'guide_paid_amount' => (float) ($s->guide_paid_amount ?? 0),
                 'pending_amount' => (float) ($s->pending_amount ?? 0),
+                'service_stage' => $s->service_stage ?? 'quote',
                 'notes' => $s->notes,
             ])->values(),
         ]);
@@ -418,6 +774,7 @@ class TourController extends Controller
         $days = (int) ($svc['days'] ?? 1);
 
         return [
+            'service_stage' => $svc['service_stage'] ?? 'quote',
             'service_type' => $svc['service_type'],
             'name' => $svc['name'],
             'supplier_id' => $svc['supplier_id'] ?? null,
@@ -426,6 +783,8 @@ class TourController extends Controller
             'days' => $days,
             'cost' => $unitPrice * $quantity * $days,
             'paid_amount' => (float) ($svc['paid_amount'] ?? 0),
+            'advance_amount' => (float) ($svc['advance_amount'] ?? 0),
+            'guide_paid_amount' => (float) ($svc['guide_paid_amount'] ?? 0),
             'notes' => $svc['notes'] ?? null,
         ];
     }

@@ -45,6 +45,17 @@ class User extends Authenticatable
         return $this->belongsToMany(Role::class);
     }
 
+    public function viewableUsers(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'user_viewable_users', 'user_id', 'viewable_user_id');
+    }
+
+    /** @return array<int> */
+    public function getViewableUserIds(): array
+    {
+        return $this->viewableUsers()->pluck('users.id')->all();
+    }
+
     public function hasPermission(string $permission): bool
     {
         if ($this->roles()->where('name', 'admin')->exists()) {

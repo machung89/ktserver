@@ -26,9 +26,10 @@ class PurchaseOrderController extends Controller
         /** @var User $user */
         $user = Auth::user();
         $canViewAll = $user->hasPermission('purchases.view_all');
+        $createdByFilter = $canViewAll ? null : array_merge([$user->id], $user->getViewableUserIds());
 
         $orders = PurchaseOrder::with(['company', 'warehouse', 'createdBy'])
-            ->when(! $canViewAll, fn ($q) => $q->where('created_by', $user->id))
+            ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->latest()
@@ -93,8 +94,9 @@ class PurchaseOrderController extends Controller
     {
         /** @var User $user */
         $user = Auth::user();
-        if (! $user->hasPermission('purchases.view_all') && $purchaseOrder->created_by !== $user->id) {
-            abort(403, 'Bạn không có quyền xem đơn nhập này.');
+        if (! $user->hasPermission('purchases.view_all')) {
+            $viewableIds = array_merge([$user->id], $user->getViewableUserIds());
+            abort_unless(in_array($purchaseOrder->created_by, $viewableIds), 403, 'Bạn không có quyền xem đơn nhập này.');
         }
 
         return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product.units']));

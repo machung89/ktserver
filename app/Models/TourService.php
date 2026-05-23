@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['tour_id', 'service_type', 'name', 'supplier_id', 'unit_price', 'quantity', 'days', 'cost', 'paid_amount', 'notes'])]
+#[Fillable(['tour_id', 'service_stage', 'service_type', 'name', 'supplier_id', 'unit_price', 'quantity', 'days', 'cost', 'paid_amount', 'advance_amount', 'guide_paid_amount', 'notes'])]
 class TourService extends Model
 {
     protected function casts(): array
@@ -16,6 +16,8 @@ class TourService extends Model
             'unit_price' => 'decimal:2',
             'cost' => 'decimal:2',
             'paid_amount' => 'decimal:2',
+            'advance_amount' => 'decimal:2',
+            'guide_paid_amount' => 'decimal:2',
             'quantity' => 'integer',
             'days' => 'integer',
         ];

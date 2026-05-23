@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['organization_id', 'tour_number', 'name', 'customer_id', 'start_date', 'end_date', 'num_guests', 'num_adults', 'num_children', 'unit_price', 'child_price', 'total_amount', 'paid_amount', 'status', 'notes', 'created_by'])]
+#[Fillable(['organization_id', 'tour_number', 'name', 'customer_id', 'start_date', 'end_date', 'num_guests', 'num_adults', 'num_children', 'unit_price', 'child_price', 'total_amount', 'paid_amount', 'extra_revenues_total', 'status', 'stage', 'notes', 'created_by'])]
 class Tour extends Model
 {
     protected static function booted(): void
@@ -25,6 +25,7 @@ class Tour extends Model
             'child_price' => 'decimal:2',
             'total_amount' => 'decimal:2',
             'paid_amount' => 'decimal:2',
+            'extra_revenues_total' => 'decimal:2',
             'num_guests' => 'integer',
             'num_adults' => 'integer',
             'num_children' => 'integer',
@@ -44,5 +45,15 @@ class Tour extends Model
     public function services(): HasMany
     {
         return $this->hasMany(TourService::class);
+    }
+
+    public function paymentRequests(): HasMany
+    {
+        return $this->hasMany(TourPaymentRequest::class);
+    }
+
+    public function extraRevenues(): HasMany
+    {
+        return $this->hasMany(TourExtraRevenue::class);
     }
 }

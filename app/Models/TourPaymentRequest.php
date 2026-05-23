@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['organization_id', 'tour_id', 'tour_service_id', 'supplier_id', 'amount', 'notes', 'status', 'requested_by', 'approved_by', 'approved_at', 'reject_reason', 'payment_id'])]
+#[Fillable(['organization_id', 'tour_id', 'tour_service_id', 'request_type', 'supplier_id', 'amount', 'notes', 'status', 'requested_by', 'approved_by', 'approved_at', 'reject_reason', 'payment_id'])]
 class TourPaymentRequest extends Model
 {
     protected static function booted(): void

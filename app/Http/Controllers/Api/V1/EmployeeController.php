@@ -16,7 +16,7 @@ class EmployeeController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $users = User::with('roles')
+        $users = User::with(['roles', 'viewableUsers'])
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%$v%")->orWhere('email', 'like', "%$v%"))
             ->orderBy('name')
             ->get()
@@ -54,7 +54,7 @@ class EmployeeController extends Controller
 
     public function show(User $employee): JsonResponse
     {
-        return response()->json(['data' => $this->format($employee->load('roles'))]);
+        return response()->json(['data' => $this->format($employee->load(['roles', 'viewableUsers']))]);
     }
 
     public function update(Request $request, User $employee): JsonResponse
@@ -69,6 +69,8 @@ class EmployeeController extends Controller
             'is_active' => 'boolean',
             'role_ids' => 'nullable|array',
             'role_ids.*' => 'exists:roles,id',
+            'viewable_user_ids' => 'nullable|array',
+            'viewable_user_ids.*' => 'exists:users,id',
         ]);
 
         if (! empty($data['password'])) {
@@ -83,7 +85,11 @@ class EmployeeController extends Controller
             $employee->roles()->sync($data['role_ids'] ?? []);
         }
 
-        return response()->json(['data' => $this->format($employee->load('roles'))]);
+        if (array_key_exists('viewable_user_ids', $data)) {
+            $employee->viewableUsers()->sync($data['viewable_user_ids'] ?? []);
+        }
+
+        return response()->json(['data' => $this->format($employee->load(['roles', 'viewableUsers']))]);
     }
 
     public function destroy(User $employee): JsonResponse
@@ -106,6 +112,9 @@ class EmployeeController extends Controller
             'position' => $user->position,
             'is_active' => $user->is_active,
             'roles' => $user->roles->map(fn ($r) => ['id' => $r->id, 'name' => $r->name, 'display_name' => $r->display_name]),
+            'viewable_user_ids' => $user->relationLoaded('viewableUsers')
+                ? $user->viewableUsers->pluck('id')->all()
+                : [],
         ];
     }
 }

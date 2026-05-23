@@ -206,6 +206,19 @@ class TourPaymentController extends Controller
                 if ($tourPayment->service) {
                     $tourPayment->service->increment('paid_amount', (float) $tourPayment->amount);
                 }
+            } elseif ($tourPayment->request_type === 'settlement_receipt') {
+                // HĐV thừa tiền → phiếu thu hoàn lại
+                $payment = $this->paymentService->createDraft([
+                    'organization_id' => $this->orgId(),
+                    'type' => 'receipt',
+                    'company_id' => $tourPayment->supplier_id,
+                    'account_id' => null,
+                    'payment_date' => now()->toDateString(),
+                    'amount' => $tourPayment->amount,
+                    'description' => $desc,
+                    'reference_type' => TourPaymentRequest::class,
+                    'reference_id' => $tourPayment->id,
+                ]);
             } else {
                 $payment = $this->paymentService->createDraft([
                     'organization_id' => $this->orgId(),
@@ -221,6 +234,14 @@ class TourPaymentController extends Controller
             }
 
             $tourPayment->update(['payment_id' => $payment->id]);
+
+            if (in_array($tourPayment->request_type, ['settlement', 'settlement_receipt'])) {
+                // Chỉ cộng paid_amount cho operating services (settlement services đã được set paid_amount = guide_paid_amount khi lưu quyết toán)
+                TourService::where('tour_id', $tourPayment->tour_id)
+                    ->where('service_stage', 'operating')
+                    ->where('guide_paid_amount', '>', 0)
+                    ->each(fn ($s) => $s->increment('paid_amount', (float) $s->guide_paid_amount));
+            }
         });
 
         return response()->json(['data' => $this->format($tourPayment->load(['tour', 'service', 'supplier', 'requestedBy', 'approvedBy']))]);
@@ -246,12 +267,23 @@ class TourPaymentController extends Controller
             'reject_reason' => ['nullable', 'string', 'max:500'],
         ]);
 
-        $tourPayment->update([
-            'status' => 'rejected',
-            'approved_by' => Auth::id(),
-            'approved_at' => now(),
-            'reject_reason' => $validated['reject_reason'] ?? null,
-        ]);
+        DB::transaction(function () use ($tourPayment, $validated) {
+            if (in_array($tourPayment->request_type, ['settlement', 'settlement_receipt'])) {
+                TourService::where('tour_id', $tourPayment->tour_id)
+                    ->where('service_stage', 'settlement')
+                    ->update(['paid_amount' => 0]);
+                $tourPayment->tour?->update(['stage' => 'operating']);
+            } elseif ($tourPayment->request_type === 'guide_advance') {
+                $tourPayment->tour?->update(['stage' => 'quote']);
+            }
+
+            $tourPayment->update([
+                'status' => 'rejected',
+                'approved_by' => Auth::id(),
+                'approved_at' => now(),
+                'reject_reason' => $validated['reject_reason'] ?? null,
+            ]);
+        });
 
         return response()->json(['data' => $this->format($tourPayment->load(['tour', 'service', 'supplier', 'requestedBy', 'approvedBy']))]);
     }
@@ -261,15 +293,34 @@ class TourPaymentController extends Controller
         DB::transaction(function () use ($tourPayment) {
             $payment = $tourPayment->payment_id ? Payment::find($tourPayment->payment_id) : null;
 
-            // Hoàn paid_amount dịch vụ chỉ khi tiền thực sự đã được ghi nhận:
-            // - Áp từ trả trước (is_advance=true, approved ngay)
-            // - Hoặc phiếu chi tiền mặt đã được giám đốc duyệt
             $wasActuallyPaid = $payment && $payment->status === 'approved';
+
+            // Hoàn paid_amount dịch vụ thường
             if ($wasActuallyPaid && $tourPayment->service) {
                 $tourPayment->service->decrement('paid_amount', (float) $tourPayment->amount);
             }
 
-            // Xóa phiếu chi + bút toán liên quan
+            // Xử lý theo loại phiếu
+            if (in_array($tourPayment->request_type, ['settlement', 'settlement_receipt'])) {
+                // Hoàn paid_amount operating services nếu đã được duyệt
+                if ($wasActuallyPaid) {
+                    TourService::where('tour_id', $tourPayment->tour_id)
+                        ->where('service_stage', 'operating')
+                        ->where('guide_paid_amount', '>', 0)
+                        ->each(fn ($s) => $s->decrement('paid_amount', (float) $s->guide_paid_amount));
+                }
+                // Hoàn paid_amount settlement services (được set ngay khi lưu quyết toán)
+                TourService::where('tour_id', $tourPayment->tour_id)
+                    ->where('service_stage', 'settlement')
+                    ->update(['paid_amount' => 0]);
+                // Revert tour stage về điều hành
+                $tourPayment->tour?->update(['stage' => 'operating']);
+            } elseif ($tourPayment->request_type === 'guide_advance') {
+                // Revert tour stage về báo giá
+                $tourPayment->tour?->update(['stage' => 'quote']);
+            }
+
+            // Xóa phiếu chi/thu + bút toán liên quan
             if ($payment) {
                 JournalEntry::where('reference_type', Payment::class)
                     ->where('reference_id', $payment->id)
@@ -294,9 +345,10 @@ class TourPaymentController extends Controller
             'tour_id' => $r->tour_id,
             'tour_number' => $r->tour?->tour_number,
             'tour_name' => $r->tour?->name,
+            'request_type' => $r->request_type ?? 'service',
             'service_id' => $r->tour_service_id,
             'service_type' => $r->service?->service_type,
-            'service_name' => $r->service?->name,
+            'service_name' => $r->service?->name ?? $r->notes,
             'supplier' => $r->supplier ? ['id' => $r->supplier->id, 'name' => $r->supplier->name] : null,
             'amount' => $r->amount,
             'notes' => $r->notes,

@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ProfileController;
 use App\Http\Controllers\Api\Public\TableOrderController;
 use App\Http\Controllers\Api\V1\AccountController;
+use App\Http\Controllers\Api\V1\ActivityLogController;
 use App\Http\Controllers\Api\V1\BankController;
 use App\Http\Controllers\Api\V1\CompanyController;
 use App\Http\Controllers\Api\V1\EmployeeController;
@@ -71,6 +72,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
                 'permissions' => $permissions,
                 'org_settings' => [
                     'enable_sales_tax' => (bool) $org?->setting('enable_sales_tax', false),
+                    'enable_purchase_tax' => (bool) $org?->setting('enable_purchase_tax', false),
                     'default_tax_rate' => (float) $org?->setting('default_tax_rate', 0),
                     'enable_discount' => (bool) $org?->setting('enable_discount', false),
                     'enable_employee_profit' => (bool) $org?->setting('enable_employee_profit', false),
@@ -292,6 +294,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('tours/{tour}/collect', [TourController::class, 'collect'])->middleware('permission:tours.confirm');
         Route::post('tours/{tour}/operate', [TourController::class, 'operate'])->middleware('permission:tours.operate');
         Route::post('tours/{tour}/settle', [TourController::class, 'settle'])->middleware('permission:tours.settle');
+        Route::patch('tours/{tour}/featured', [TourController::class, 'toggleFeatured'])->middleware('permission:tours.confirm');
 
         // Thu phát sinh khách hàng
         Route::middleware('permission:tours.operate')->group(function () {
@@ -314,5 +317,9 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('tour-payments/{tourPayment}/approve', [TourPaymentController::class, 'approve'])->middleware('permission:tours.payment_approve');
         Route::post('tour-payments/{tourPayment}/reject', [TourPaymentController::class, 'reject'])->middleware('permission:tours.payment_approve');
         Route::delete('tour-payments/{tourPayment}', [TourPaymentController::class, 'destroy'])->middleware('permission:tours.payment_approve');
+
+        // Nhật ký hoạt động
+        Route::get('activity-logs', [ActivityLogController::class, 'index'])->middleware('permission:tours.view');
+        Route::post('activity-logs/note', [ActivityLogController::class, 'storeNote'])->middleware('permission:tours.view');
     });
 });

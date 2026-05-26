@@ -11,10 +11,12 @@ use App\Models\Payment;
 use App\Models\Tour;
 use App\Models\TourPaymentRequest;
 use App\Models\TourService;
+use App\Services\ActivityLogService;
 use App\Services\PaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -23,7 +25,10 @@ class PaymentController extends Controller
 {
     use ScopedByOrganization;
 
-    public function __construct(protected PaymentService $paymentService) {}
+    public function __construct(
+        protected PaymentService $paymentService,
+        protected ActivityLogService $activityLog,
+    ) {}
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -105,6 +110,18 @@ class PaymentController extends Controller
 
         $payment = $this->paymentService->create(array_merge($validated, ['organization_id' => $this->orgId()]));
 
+        $typeLabels = [
+            PaymentType::Receipt->value => 'Thu tiền',
+            PaymentType::Payment->value => 'Chi tiền',
+            PaymentType::Transfer->value => 'Chuyển khoản',
+        ];
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'payment_created',
+            ($typeLabels[$validated['type']] ?? 'Phiếu').': '.number_format((float) $validated['amount']).'đ',
+            null, [], 'payment', $payment->id
+        );
+
         return (new PaymentResource($payment))->response()->setStatusCode(201);
     }
 
@@ -121,11 +138,22 @@ class PaymentController extends Controller
 
         $payment = $this->paymentService->approve($payment, (int) $validated['account_id']);
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'payment_approved',
+            'Duyệt phiếu: '.number_format((float) $payment->amount).'đ',
+            null, [], 'payment', $payment->id
+        );
+
         return (new PaymentResource($payment))->response();
     }
 
     public function destroy(Payment $payment): JsonResponse
     {
+        $paymentId = $payment->id;
+        $paymentAmount = (float) $payment->amount;
+        $paymentType = $payment->type instanceof PaymentType ? $payment->type->value : (string) $payment->type;
+
         DB::transaction(function () use ($payment) {
             JournalEntry::where('reference_type', Payment::class)
                 ->where('reference_id', $payment->id)
@@ -178,6 +206,18 @@ class PaymentController extends Controller
 
             $payment->delete();
         });
+
+        $typeLabels = [
+            PaymentType::Receipt->value => 'Thu tiền',
+            PaymentType::Payment->value => 'Chi tiền',
+            PaymentType::Transfer->value => 'Chuyển khoản',
+        ];
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'payment_deleted',
+            'Xóa '.($typeLabels[$paymentType] ?? 'phiếu').': '.number_format($paymentAmount).'đ',
+            null, [], 'payment', $paymentId
+        );
 
         return response()->json(null, 204);
     }

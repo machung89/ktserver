@@ -9,6 +9,7 @@ use App\Models\Payment;
 use App\Models\TourGuideAdvance;
 use App\Models\TourPaymentRequest;
 use App\Models\TourService;
+use App\Services\ActivityLogService;
 use App\Services\JournalEntryService;
 use App\Services\PaymentService;
 use Illuminate\Http\JsonResponse;
@@ -24,6 +25,7 @@ class TourPaymentController extends Controller
     public function __construct(
         protected PaymentService $paymentService,
         protected JournalEntryService $journalEntryService,
+        protected ActivityLogService $activityLog,
     ) {}
 
     public function index(Request $request): JsonResponse
@@ -82,6 +84,10 @@ class TourPaymentController extends Controller
             'status' => 'pending',
             'requested_by' => Auth::id(),
         ]);
+
+        $amt = number_format((float) $item->amount, 0, ',', '.');
+        $svcName = $item->service?->name ?? $item->notes ?? '';
+        $this->activityLog->log($this->orgId(), Auth::id(), 'payment_created', "Lên lệnh thanh toán: {$svcName} — {$amt}₫", $item->tour_id);
 
         return response()->json(['data' => $this->format($item->load(['tour', 'service', 'supplier', 'requestedBy']))], 201);
     }
@@ -244,6 +250,10 @@ class TourPaymentController extends Controller
             }
         });
 
+        $amt = number_format((float) $tourPayment->amount, 0, ',', '.');
+        $svcName = $tourPayment->service?->name ?? $tourPayment->notes ?? '';
+        $this->activityLog->log($this->orgId(), Auth::id(), 'payment_approved', "Duyệt lệnh thanh toán: {$svcName} — {$amt}₫", $tourPayment->tour_id);
+
         return response()->json(['data' => $this->format($tourPayment->load(['tour', 'service', 'supplier', 'requestedBy', 'approvedBy']))]);
     }
 
@@ -285,11 +295,19 @@ class TourPaymentController extends Controller
             ]);
         });
 
+        $amt = number_format((float) $tourPayment->amount, 0, ',', '.');
+        $svcName = $tourPayment->service?->name ?? $tourPayment->notes ?? '';
+        $this->activityLog->log($this->orgId(), Auth::id(), 'payment_rejected', "Từ chối lệnh thanh toán: {$svcName} — {$amt}₫", $tourPayment->tour_id);
+
         return response()->json(['data' => $this->format($tourPayment->load(['tour', 'service', 'supplier', 'requestedBy', 'approvedBy']))]);
     }
 
     public function destroy(TourPaymentRequest $tourPayment): JsonResponse
     {
+        $amt = number_format((float) $tourPayment->amount, 0, ',', '.');
+        $svcName = $tourPayment->service?->name ?? $tourPayment->notes ?? '';
+        $tourId = $tourPayment->tour_id;
+
         DB::transaction(function () use ($tourPayment) {
             $payment = $tourPayment->payment_id ? Payment::find($tourPayment->payment_id) : null;
 
@@ -333,6 +351,8 @@ class TourPaymentController extends Controller
 
             $tourPayment->delete();
         });
+
+        $this->activityLog->log($this->orgId(), Auth::id(), 'payment_deleted', "Xóa lệnh thanh toán: {$svcName} — {$amt}₫", $tourId);
 
         return response()->json(null, 204);
     }

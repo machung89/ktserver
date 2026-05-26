@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\JournalEntry;
 use App\Models\Tour;
 use App\Models\TourGuideAdvance;
+use App\Services\ActivityLogService;
 use App\Services\JournalEntryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -17,7 +18,10 @@ class TourGuideAdvanceController extends Controller
 {
     use ScopedByOrganization;
 
-    public function __construct(protected JournalEntryService $journalEntryService) {}
+    public function __construct(
+        protected JournalEntryService $journalEntryService,
+        protected ActivityLogService $activityLog,
+    ) {}
 
     public function index(Tour $tour): JsonResponse
     {
@@ -79,6 +83,9 @@ class TourGuideAdvanceController extends Controller
             return $advance;
         });
 
+        $amt = number_format((float) $advance->amount, 0, ',', '.');
+        $this->activityLog->log($this->orgId(), Auth::id(), 'advance_created', "Tạm ứng HĐV {$advance->guide?->name} — {$amt}₫", $tour->id);
+
         return response()->json(['data' => $this->format($advance->load(['guide', 'account']))], 201);
     }
 
@@ -86,6 +93,10 @@ class TourGuideAdvanceController extends Controller
     {
         abort_unless($tourGuideAdvance->organization_id === $this->orgId(), 403);
         abort_unless((float) $tourGuideAdvance->used_amount === 0.0, 422, 'Không thể xóa tạm ứng đã được sử dụng.');
+
+        $amt = number_format((float) $tourGuideAdvance->amount, 0, ',', '.');
+        $guideName = $tourGuideAdvance->guide?->name ?? '';
+        $tourId = $tourGuideAdvance->tour_id;
 
         DB::transaction(function () use ($tourGuideAdvance) {
             JournalEntry::where('reference_type', TourGuideAdvance::class)
@@ -97,6 +108,8 @@ class TourGuideAdvanceController extends Controller
 
             $tourGuideAdvance->delete();
         });
+
+        $this->activityLog->log($this->orgId(), Auth::id(), 'advance_deleted', "Xóa tạm ứng HĐV {$guideName} — {$amt}₫", $tourId);
 
         return response()->json(null, 204);
     }

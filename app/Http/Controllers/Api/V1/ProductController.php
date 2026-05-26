@@ -6,9 +6,11 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\ProductResource;
 use App\Models\Product;
+use App\Services\ActivityLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
@@ -16,6 +18,8 @@ use Illuminate\Validation\Rule;
 class ProductController extends Controller
 {
     use ScopedByOrganization;
+
+    public function __construct(protected ActivityLogService $activityLog) {}
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -74,6 +78,13 @@ class ProductController extends Controller
 
         $this->syncUnits($product, $validated['units'] ?? []);
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'product_created',
+            "Tạo sản phẩm #{$product->code} - {$product->name}",
+            null, [], 'product', $product->id
+        );
+
         return (new ProductResource($product->load('units')))->response()->setStatusCode(201);
     }
 
@@ -107,15 +118,33 @@ class ProductController extends Controller
             $this->syncUnits($product, $validated['units'] ?? []);
         }
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'product_updated',
+            "Cập nhật sản phẩm #{$product->code} - {$product->name}",
+            null, [], 'product', $product->id
+        );
+
         return new ProductResource($product->load(['category.parent', 'units']));
     }
 
     public function destroy(Product $product): JsonResponse
     {
+        $code = $product->code;
+        $name = $product->name;
+        $id = $product->id;
+
         if ($product->image_path) {
             Storage::disk('public')->delete($product->image_path);
         }
         $product->delete();
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'product_deleted',
+            "Xóa sản phẩm #{$code} - {$name}",
+            null, [], 'product', $id
+        );
 
         return response()->json(null, 204);
     }

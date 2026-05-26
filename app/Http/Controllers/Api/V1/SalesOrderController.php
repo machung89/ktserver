@@ -16,6 +16,7 @@ use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\User;
 use App\Models\Warehouse;
+use App\Services\ActivityLogService;
 use App\Services\SalesOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -28,7 +29,10 @@ class SalesOrderController extends Controller
 {
     use ScopedByOrganization;
 
-    public function __construct(protected SalesOrderService $salesOrderService) {}
+    public function __construct(
+        protected SalesOrderService $salesOrderService,
+        protected ActivityLogService $activityLog,
+    ) {}
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -314,6 +318,13 @@ class SalesOrderController extends Controller
             throw $e;
         }
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_created',
+            "Tạo đơn bán {$order->order_number}",
+            null, [], 'sales_order', $order->id
+        );
+
         return (new SalesOrderResource($order->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse'])))
             ->response()->setStatusCode(201);
     }
@@ -487,6 +498,13 @@ class SalesOrderController extends Controller
             ]);
         });
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_updated',
+            "Cập nhật đơn bán {$salesOrder->order_number}",
+            null, [], 'sales_order', $salesOrder->id
+        );
+
         return new SalesOrderResource($salesOrder->fresh()->load(['company', 'restaurantTable', 'items.product', 'items.warehouse']));
     }
 
@@ -496,7 +514,16 @@ class SalesOrderController extends Controller
             throw ValidationException::withMessages(['status' => ['Chỉ có thể xác nhận đơn ở trạng thái nháp.']]);
         }
 
-        return new SalesOrderResource($this->salesOrderService->confirm($salesOrder));
+        $result = $this->salesOrderService->confirm($salesOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_confirmed',
+            "Xác nhận đơn bán {$result->order_number}",
+            null, [], 'sales_order', $result->id
+        );
+
+        return new SalesOrderResource($result);
     }
 
     public function ship(SalesOrder $salesOrder): SalesOrderResource
@@ -506,6 +533,13 @@ class SalesOrderController extends Controller
         }
 
         $salesOrder->update(['status' => OrderStatus::Shipping]);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_shipped',
+            "Chuyển đơn bán {$salesOrder->order_number} sang đang giao",
+            null, [], 'sales_order', $salesOrder->id
+        );
 
         return new SalesOrderResource($salesOrder->fresh());
     }
@@ -518,6 +552,13 @@ class SalesOrderController extends Controller
 
         $salesOrder->update(['status' => OrderStatus::Completed]);
         $this->releaseTableIfIdle($salesOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_completed',
+            "Hoàn thành đơn bán {$salesOrder->order_number}",
+            null, [], 'sales_order', $salesOrder->id
+        );
 
         return new SalesOrderResource($salesOrder->fresh());
     }
@@ -544,6 +585,13 @@ class SalesOrderController extends Controller
 
         $result = $this->salesOrderService->cancel($salesOrder);
         $this->releaseTableIfIdle($salesOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_cancelled',
+            "Hủy đơn bán {$salesOrder->order_number}",
+            null, [], 'sales_order', $salesOrder->id
+        );
 
         return new SalesOrderResource($result);
     }

@@ -69,6 +69,16 @@ class JournalEntryService
         }
     }
 
+    public function deleteByReference(Model $reference): void
+    {
+        JournalEntry::where('reference_type', $reference::class)
+            ->where('reference_id', $reference->id)
+            ->each(function (JournalEntry $entry) {
+                $entry->lines()->delete();
+                $entry->delete();
+            });
+    }
+
     private function generateEntryNumber(): string
     {
         $last = JournalEntry::orderByDesc('id')->lockForUpdate()->first();

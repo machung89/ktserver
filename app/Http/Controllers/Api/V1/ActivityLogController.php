@@ -1,0 +1,77 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+
+use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
+use App\Http\Controllers\Controller;
+use App\Models\ActivityLog;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+
+class ActivityLogController extends Controller
+{
+    use ScopedByOrganization;
+
+    public function index(Request $request): JsonResponse
+    {
+        $hasFilter = $request->filled('tour_id')
+            || ($request->filled('subject_type') && $request->filled('subject_id'));
+
+        if (! $hasFilter) {
+            abort_unless(
+                Auth::user()->hasPermission('activity_logs.view_all'),
+                403,
+                'Chỉ quản trị viên được xem nhật ký toàn bộ.'
+            );
+        }
+
+        $logs = ActivityLog::with(['causer', 'tour'])
+            ->when($request->tour_id, fn ($q, $v) => $q->where('tour_id', $v))
+            ->when(
+                $request->filled('subject_type') && $request->filled('subject_id'),
+                fn ($q) => $q->where('subject_type', $request->subject_type)
+                    ->where('subject_id', $request->subject_id)
+            )
+            ->latest()
+            ->limit(300)
+            ->get();
+
+        return response()->json(['data' => $logs->map(fn ($l) => $this->format($l))]);
+    }
+
+    public function storeNote(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'tour_id' => ['nullable', 'exists:tours,id'],
+            'description' => ['required', 'string', 'max:2000'],
+        ]);
+
+        $log = ActivityLog::create([
+            'organization_id' => $this->orgId(),
+            'causer_id' => Auth::id(),
+            'tour_id' => $validated['tour_id'] ?? null,
+            'action' => 'note',
+            'description' => $validated['description'],
+        ]);
+
+        return response()->json(['data' => $this->format($log->load('causer'))], 201);
+    }
+
+    /** @return array<string, mixed> */
+    private function format(ActivityLog $log): array
+    {
+        return [
+            'id' => $log->id,
+            'action' => $log->action,
+            'description' => $log->description,
+            'causer_name' => $log->causer?->name,
+            'tour_id' => $log->tour_id,
+            'tour_number' => $log->tour?->tour_number,
+            'subject_type' => $log->subject_type,
+            'subject_id' => $log->subject_id,
+            'properties' => $log->properties,
+            'created_at' => $log->created_at?->toDateTimeString(),
+        ];
+    }
+}

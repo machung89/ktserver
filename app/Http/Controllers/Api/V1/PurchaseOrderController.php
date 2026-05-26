@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PurchaseOrderResource;
 use App\Models\PurchaseOrder;
 use App\Models\User;
+use App\Services\ActivityLogService;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -19,7 +20,10 @@ class PurchaseOrderController extends Controller
 {
     use ScopedByOrganization;
 
-    public function __construct(protected PurchaseOrderService $purchaseOrderService) {}
+    public function __construct(
+        protected PurchaseOrderService $purchaseOrderService,
+        protected ActivityLogService $activityLog,
+    ) {}
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -86,6 +90,13 @@ class PurchaseOrderController extends Controller
 
         $order->update(['subtotal' => $subtotal, 'tax_amount' => $taxAmount, 'total_amount' => $subtotal + $taxAmount]);
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_created',
+            "Tạo đơn nhập {$order->order_number}",
+            null, [], 'purchase_order', $order->id
+        );
+
         return (new PurchaseOrderResource($order->load(['company', 'warehouse', 'items.product.units'])))
             ->response()->setStatusCode(201);
     }
@@ -117,6 +128,13 @@ class PurchaseOrderController extends Controller
 
         $purchaseOrder->update($validated);
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_updated',
+            "Cập nhật đơn nhập {$purchaseOrder->order_number}",
+            null, [], 'purchase_order', $purchaseOrder->id
+        );
+
         return new PurchaseOrderResource($purchaseOrder->load(['company', 'warehouse', 'items.product.units']));
     }
 
@@ -126,7 +144,16 @@ class PurchaseOrderController extends Controller
             throw ValidationException::withMessages(['status' => ['Chỉ có thể xác nhận phiếu ở trạng thái nháp.']]);
         }
 
-        return new PurchaseOrderResource($this->purchaseOrderService->confirm($purchaseOrder));
+        $result = $this->purchaseOrderService->confirm($purchaseOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_confirmed',
+            "Xác nhận đơn nhập {$result->order_number}",
+            null, [], 'purchase_order', $result->id
+        );
+
+        return new PurchaseOrderResource($result);
     }
 
     public function ship(PurchaseOrder $purchaseOrder): PurchaseOrderResource
@@ -136,6 +163,13 @@ class PurchaseOrderController extends Controller
         }
 
         $purchaseOrder->update(['status' => OrderStatus::Shipping]);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_shipped',
+            "Chuyển đơn nhập {$purchaseOrder->order_number} sang đang giao",
+            null, [], 'purchase_order', $purchaseOrder->id
+        );
 
         return new PurchaseOrderResource($purchaseOrder->fresh());
     }
@@ -148,6 +182,13 @@ class PurchaseOrderController extends Controller
 
         $purchaseOrder->update(['status' => OrderStatus::Completed]);
 
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_completed',
+            "Hoàn thành đơn nhập {$purchaseOrder->order_number}",
+            null, [], 'purchase_order', $purchaseOrder->id
+        );
+
         return new PurchaseOrderResource($purchaseOrder->fresh());
     }
 
@@ -157,7 +198,16 @@ class PurchaseOrderController extends Controller
             throw ValidationException::withMessages(['status' => ['Không thể hủy phiếu đã hoàn thành.']]);
         }
 
-        return new PurchaseOrderResource($this->purchaseOrderService->cancel($purchaseOrder));
+        $result = $this->purchaseOrderService->cancel($purchaseOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_cancelled',
+            "Hủy đơn nhập {$purchaseOrder->order_number}",
+            null, [], 'purchase_order', $purchaseOrder->id
+        );
+
+        return new PurchaseOrderResource($result);
     }
 
     public function bulkConfirm(Request $request): JsonResponse

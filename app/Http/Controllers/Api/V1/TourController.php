@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
+use App\Models\Organization;
 use App\Models\Payment;
 use App\Models\Tour;
 use App\Models\TourExtraRevenue;
@@ -11,6 +12,7 @@ use App\Models\TourGuideAdvance;
 use App\Models\TourPaymentRequest;
 use App\Models\TourService;
 use App\Models\User;
+use App\Services\ActivityLogService;
 use App\Services\PaymentService;
 use App\Services\TourService as TourServiceClass;
 use Illuminate\Http\JsonResponse;
@@ -26,6 +28,7 @@ class TourController extends Controller
     public function __construct(
         protected TourServiceClass $tourService,
         protected PaymentService $paymentService,
+        protected ActivityLogService $activityLog,
     ) {}
 
     public function index(Request $request): JsonResponse
@@ -74,6 +77,7 @@ class TourController extends Controller
             'num_children' => ['nullable', 'integer', 'min:0'],
             'unit_price' => ['required', 'numeric', 'min:0'],
             'child_price' => ['nullable', 'numeric', 'min:0'],
+            'vat_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'notes' => ['nullable', 'string'],
             'services' => ['nullable', 'array'],
             'services.*.service_type' => ['required', 'string'],
@@ -85,6 +89,7 @@ class TourController extends Controller
             'services.*.paid_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.advance_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'services.*.notes' => ['nullable', 'string'],
         ]);
 
@@ -93,6 +98,9 @@ class TourController extends Controller
             $numChildren = (int) ($validated['num_children'] ?? 0);
             $adultPrice = (float) $validated['unit_price'];
             $childPrice = (float) ($validated['child_price'] ?? round($adultPrice * 0.7));
+            $vatRate = (float) ($validated['vat_rate'] ?? 0);
+            $subtotal = $numAdults * $adultPrice + $numChildren * $childPrice;
+            $taxAmount = round($subtotal * $vatRate / 100, 2);
 
             $tour = Tour::create([
                 'organization_id' => $this->orgId(),
@@ -106,7 +114,10 @@ class TourController extends Controller
                 'num_guests' => $numAdults + $numChildren,
                 'unit_price' => $adultPrice,
                 'child_price' => $childPrice,
-                'total_amount' => $numAdults * $adultPrice + $numChildren * $childPrice,
+                'vat_rate' => $vatRate,
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'total_amount' => $subtotal + $taxAmount,
                 'status' => 'draft',
                 'notes' => $validated['notes'] ?? null,
                 'created_by' => Auth::id(),
@@ -121,6 +132,8 @@ class TourController extends Controller
 
         $tour->load(['customer', 'createdBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
+
+        $this->activityLog->log($this->orgId(), Auth::id(), 'created', "Tạo tour #{$tour->tour_number}: {$tour->name}", $tour->id);
 
         return response()->json(['data' => $this->format($tour)], 201);
     }
@@ -153,6 +166,7 @@ class TourController extends Controller
             'num_children' => ['nullable', 'integer', 'min:0'],
             'unit_price' => ['required', 'numeric', 'min:0'],
             'child_price' => ['nullable', 'numeric', 'min:0'],
+            'vat_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'notes' => ['nullable', 'string'],
             'services' => ['nullable', 'array'],
             'services.*.id' => ['nullable', 'exists:tour_services,id'],
@@ -165,6 +179,7 @@ class TourController extends Controller
             'services.*.paid_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.advance_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'services.*.notes' => ['nullable', 'string'],
         ]);
 
@@ -179,6 +194,9 @@ class TourController extends Controller
             $numChildren = (int) ($validated['num_children'] ?? 0);
             $adultPrice = (float) $validated['unit_price'];
             $childPrice = (float) ($validated['child_price'] ?? round($adultPrice * 0.7));
+            $vatRate = (float) ($validated['vat_rate'] ?? 0);
+            $subtotal = $numAdults * $adultPrice + $numChildren * $childPrice;
+            $taxAmount = round($subtotal * $vatRate / 100, 2);
 
             $tour->update([
                 'name' => $validated['name'],
@@ -190,7 +208,10 @@ class TourController extends Controller
                 'num_guests' => $numAdults + $numChildren,
                 'unit_price' => $adultPrice,
                 'child_price' => $childPrice,
-                'total_amount' => $numAdults * $adultPrice + $numChildren * $childPrice,
+                'vat_rate' => $vatRate,
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'total_amount' => $subtotal + $taxAmount + (float) $tour->extra_revenues_total,
                 'notes' => $validated['notes'] ?? null,
             ]);
 
@@ -231,6 +252,8 @@ class TourController extends Controller
 
         $tour->load(['customer', 'createdBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
+
+        $this->activityLog->log($this->orgId(), Auth::id(), 'updated', "Cập nhật báo giá tour #{$tour->tour_number}", $tour->id);
 
         return response()->json(['data' => $this->format($tour)]);
     }
@@ -328,6 +351,8 @@ class TourController extends Controller
         $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
+        $this->activityLog->log($this->orgId(), Auth::id(), 'operated', "Lưu điều hành tour #{$tour->tour_number}", $tour->id);
+
         return response()->json(['data' => $this->format($fresh)]);
     }
 
@@ -345,6 +370,7 @@ class TourController extends Controller
             'services.*.quantity' => ['nullable', 'integer', 'min:1'],
             'services.*.days' => ['nullable', 'integer', 'min:1'],
             'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'services.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'services.*.notes' => ['nullable', 'string'],
             'extra_revenues' => ['nullable', 'array'],
             'extra_revenues.*.id' => ['nullable', 'exists:tour_extra_revenues,id'],
@@ -418,6 +444,8 @@ class TourController extends Controller
         $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
+        $this->activityLog->log($this->orgId(), Auth::id(), 'settled', "Lưu quyết toán tour #{$tour->tour_number}", $tour->id);
+
         return response()->json(['data' => $this->format($fresh)]);
     }
 
@@ -430,6 +458,8 @@ class TourController extends Controller
         $tour->load(['customer', 'createdBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
+        $this->activityLog->log($this->orgId(), Auth::id(), 'confirmed', "Xác nhận tour #{$tour->tour_number}", $tour->id);
+
         return response()->json(['data' => $this->format($tour)]);
     }
 
@@ -441,16 +471,20 @@ class TourController extends Controller
         $tour->load(['customer', 'createdBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
+        $this->activityLog->log($this->orgId(), Auth::id(), 'completed', "Hoàn thành tour #{$tour->tour_number}", $tour->id);
+
         return response()->json(['data' => $this->format($tour)]);
     }
 
     public function cancel(Tour $tour): JsonResponse
     {
         abort_unless(in_array($tour->status, ['draft', 'confirmed']), 422, 'Không thể hủy tour ở trạng thái này.');
-        $tour->update(['status' => 'cancelled']);
+        $tour = $this->tourService->cancel($tour);
 
         $tour->load(['customer', 'createdBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
+
+        $this->activityLog->log($this->orgId(), Auth::id(), 'cancelled', "Hủy tour #{$tour->tour_number}", $tour->id);
 
         return response()->json(['data' => $this->format($tour)]);
     }
@@ -503,6 +537,9 @@ class TourController extends Controller
         $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
+        $amount = number_format((float) $validated['amount'], 0, ',', '.');
+        $this->activityLog->log($this->orgId(), Auth::id(), 'collected', "Thu tiền khách {$amount}₫ - Tour #{$tour->tour_number}", $tour->id);
+
         return response()->json(['data' => $this->format($fresh)]);
     }
 
@@ -528,6 +565,8 @@ class TourController extends Controller
         ]);
 
         $tour->increment('extra_revenues_total', $item->amount);
+        $tour->refresh();
+        $this->recalculateTotalAmount($tour);
 
         return response()->json(['data' => $this->formatExtraRevenue($item)], 201);
     }
@@ -554,9 +593,10 @@ class TourController extends Controller
             'notes' => $validated['notes'] ?? null,
         ]);
 
-        $extraRevenue->tour->update([
-            'extra_revenues_total' => $extraRevenue->tour->extraRevenues()->sum('amount'),
-        ]);
+        $t = $extraRevenue->tour;
+        $t->update(['extra_revenues_total' => $t->extraRevenues()->sum('amount')]);
+        $t->refresh();
+        $this->recalculateTotalAmount($t);
 
         return response()->json(['data' => $this->formatExtraRevenue($extraRevenue)]);
     }
@@ -568,16 +608,35 @@ class TourController extends Controller
         $tour = $extraRevenue->tour;
         $extraRevenue->delete();
         $tour->decrement('extra_revenues_total', $extraRevenue->amount);
+        $tour->refresh();
+        $this->recalculateTotalAmount($tour);
 
         return response()->json(null, 204);
+    }
+
+    public function toggleFeatured(Tour $tour): JsonResponse
+    {
+        $tour->update(['is_featured' => ! $tour->is_featured]);
+
+        return response()->json(['data' => ['id' => $tour->id, 'is_featured' => $tour->is_featured]]);
     }
 
     public function destroy(Tour $tour): JsonResponse
     {
         abort_unless($tour->status === 'draft', 422, 'Chỉ có thể xóa tour ở trạng thái nháp.');
+
+        $this->activityLog->log($this->orgId(), Auth::id(), 'deleted', "Xóa tour #{$tour->tour_number}: {$tour->name}");
+
         $tour->delete();
 
         return response()->json(null, 204);
+    }
+
+    private function recalculateTotalAmount(Tour $tour): void
+    {
+        $tour->update([
+            'total_amount' => (float) $tour->subtotal + (float) $tour->tax_amount + (float) $tour->extra_revenues_total,
+        ]);
     }
 
     /** @return array<string, mixed> */
@@ -595,15 +654,19 @@ class TourController extends Controller
             'num_guests' => $tour->num_guests,
             'unit_price' => $tour->unit_price,
             'child_price' => $tour->child_price,
+            'vat_rate' => (float) ($tour->vat_rate ?? 0),
+            'subtotal' => (float) ($tour->subtotal ?? 0),
+            'tax_amount' => (float) ($tour->tax_amount ?? 0),
             'total_amount' => $tour->total_amount,
             'paid_amount' => $tour->paid_amount,
-            'receivable' => max(0, (float) $tour->total_amount + (float) $tour->extra_revenues_total - (float) $tour->paid_amount),
+            'receivable' => max(0, (float) $tour->total_amount - (float) $tour->paid_amount),
             'services_cost' => (float) ($tour->services_cost_total ?? $tour->services?->sum(fn ($s) => (float) $s->cost) ?? 0),
             'services_paid' => (float) ($tour->services_paid_total ?? $tour->services?->sum(fn ($s) => (float) $s->paid_amount) ?? 0),
             'payable' => max(0, (float) ($tour->services_cost_total ?? 0) - (float) ($tour->services_paid_total ?? 0)),
             'extra_revenues_total' => (float) $tour->extra_revenues_total,
             'status' => $tour->status,
             'stage' => $tour->stage ?? 'quote',
+            'is_featured' => (bool) $tour->is_featured,
             'created_by_name' => $tour->createdBy?->name,
         ];
     }
@@ -753,6 +816,7 @@ class TourController extends Controller
                 'unit_price' => $s->unit_price,
                 'quantity' => $s->quantity,
                 'days' => $s->days,
+                'tax_rate' => (float) ($s->tax_rate ?? 0),
                 'cost' => $s->cost,
                 'paid_amount' => $s->paid_amount,
                 'advance_amount' => (float) ($s->advance_amount ?? 0),
@@ -772,6 +836,8 @@ class TourController extends Controller
         $unitPrice = (float) ($svc['unit_price'] ?? 0);
         $quantity = (int) ($svc['quantity'] ?? 1);
         $days = (int) ($svc['days'] ?? 1);
+        $taxRate = (float) ($svc['tax_rate'] ?? 0);
+        $baseCost = $unitPrice * $quantity * $days;
 
         return [
             'service_stage' => $svc['service_stage'] ?? 'quote',
@@ -781,7 +847,8 @@ class TourController extends Controller
             'unit_price' => $unitPrice,
             'quantity' => $quantity,
             'days' => $days,
-            'cost' => $unitPrice * $quantity * $days,
+            'tax_rate' => $taxRate,
+            'cost' => round($baseCost * (1 + $taxRate / 100), 2),
             'paid_amount' => (float) ($svc['paid_amount'] ?? 0),
             'advance_amount' => (float) ($svc['advance_amount'] ?? 0),
             'guide_paid_amount' => (float) ($svc['guide_paid_amount'] ?? 0),
@@ -791,9 +858,15 @@ class TourController extends Controller
 
     private function generateTourNumber(): string
     {
-        $last = Tour::withoutGlobalScopes()->orderByDesc('id')->lockForUpdate()->first();
-        $seq = $last ? ((int) substr($last->tour_number, 4)) + 1 : 1;
+        $raw = Organization::find($this->orgId())?->setting('tour_number_prefix', 'TOUR') ?? 'TOUR';
+        $prefix = strtoupper(trim((string) $raw)) ?: 'TOUR';
 
-        return 'TOUR'.str_pad($seq, 6, '0', STR_PAD_LEFT);
+        $last = Tour::withoutGlobalScopes()->orderByDesc('id')->lockForUpdate()->first();
+        $seq = 1;
+        if ($last && preg_match('/(\d+)$/', $last->tour_number, $m)) {
+            $seq = (int) $m[1] + 1;
+        }
+
+        return $prefix.str_pad($seq, 6, '0', STR_PAD_LEFT);
     }
 }

@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\ProductResource;
 use App\Models\Product;
+use App\Models\ProductCategory;
 use App\Services\ActivityLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -179,7 +180,7 @@ class ProductController extends Controller
 
         $orgId = $this->orgId();
         $updateExisting = (bool) $request->boolean('update_existing', false);
-        $allowedUpdateFields = ['name', 'unit', 'price', 'cost_price', 'unit2', 'barcode', 'description'];
+        $allowedUpdateFields = ['name', 'unit', 'price', 'cost_price', 'unit2', 'barcode', 'description', 'category_name'];
         $updateFields = $updateExisting
             ? array_intersect($request->input('update_fields', $allowedUpdateFields), $allowedUpdateFields)
             : [];
@@ -187,6 +188,10 @@ class ProductController extends Controller
         $existingProducts = Product::where('organization_id', $orgId)
             ->get()
             ->keyBy(fn ($p) => strtolower($p->code));
+
+        $categories = ProductCategory::where('organization_id', $orgId)
+            ->get()
+            ->keyBy(fn ($c) => strtolower(trim($c->name)));
 
         $success = 0;
         $updated = 0;
@@ -218,6 +223,17 @@ class ProductController extends Controller
             }
 
             try {
+                $categoryId = null;
+                $categoryName = trim($row['category_name'] ?? '');
+                if ($categoryName !== '') {
+                    $key = strtolower($categoryName);
+                    if (! isset($categories[$key])) {
+                        $cat = ProductCategory::create(['organization_id' => $orgId, 'name' => $categoryName]);
+                        $categories[$key] = $cat;
+                    }
+                    $categoryId = $categories[$key]->id;
+                }
+
                 $allData = [
                     'name' => trim($row['name']),
                     'unit' => trim($row['unit']),
@@ -225,13 +241,15 @@ class ProductController extends Controller
                     'cost_price' => (float) $row['cost_price'],
                     'barcode' => $row['barcode'] ?: null,
                     'description' => $row['description'] ?: null,
+                    'category_id' => $categoryId,
                 ];
 
                 if ($existing) {
-                    $fieldsToUpdate = array_intersect_key(
-                        $allData,
-                        array_flip(array_diff($updateFields, ['unit2']))
-                    );
+                    $updateCols = array_diff($updateFields, ['unit2', 'category_name']);
+                    $fieldsToUpdate = array_intersect_key($allData, array_flip($updateCols));
+                    if ($categoryId !== null && in_array('category_name', $updateFields)) {
+                        $fieldsToUpdate['category_id'] = $categoryId;
+                    }
                     if (! empty($fieldsToUpdate)) {
                         $existing->update($fieldsToUpdate);
                     }

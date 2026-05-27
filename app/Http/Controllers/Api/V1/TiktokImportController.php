@@ -29,6 +29,7 @@ class TiktokImportController extends Controller
             'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
             'rows' => ['required', 'array', 'min:1'],
             'rows.*.order_id' => ['required', 'string'],
+            'rows.*.order_date' => ['nullable', 'date'],
             'rows.*.status' => ['nullable', 'string'],
             'rows.*.sku' => ['nullable', 'string'],
             'rows.*.product_name' => ['nullable', 'string'],
@@ -161,6 +162,8 @@ class TiktokImportController extends Controller
                     $last = SalesOrder::orderByDesc('id')->lockForUpdate()->first();
                     $seq = $last ? ((int) substr($last->order_number, 2)) + 1 : 1;
 
+                    $orderDate = ! empty($firstRow['order_date']) ? $firstRow['order_date'] : now()->toDateString();
+
                     $order = SalesOrder::create([
                         'order_number' => 'BH'.str_pad($seq, 6, '0', STR_PAD_LEFT),
                         'ref_id' => (string) $orderId,
@@ -168,7 +171,7 @@ class TiktokImportController extends Controller
                         'status' => OrderStatus::Draft,
                         'organization_id' => $orgId,
                         'company_id' => $company->id,
-                        'order_date' => now()->toDateString(),
+                        'order_date' => $orderDate,
                         'notes' => null,
                         'subtotal' => 0,
                         'tax_amount' => 0,

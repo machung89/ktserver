@@ -49,6 +49,8 @@ class SalesOrderController extends Controller
             ->when($request->search, function ($q, $v) {
                 $q->where(function ($q) use ($v) {
                     $q->where('order_number', 'like', "%{$v}%")
+                        ->orWhere('ref_id', 'like', "%{$v}%")
+                        ->orWhere('tracking_number', 'like', "%{$v}%")
                         ->orWhereHas('company', fn ($cq) => $cq->where('name', 'like', "%{$v}%"));
                 });
             })

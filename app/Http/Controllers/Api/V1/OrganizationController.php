@@ -80,7 +80,8 @@ class OrganizationController extends Controller
         DB::transaction(function () use ($productIds, $orgId) {
             DB::table('inventory_transaction_items')->whereIn('product_id', $productIds)->delete();
             DB::table('inventories')->where('organization_id', $orgId)->delete();
-            DB::table('recipe_ingredients')->whereIn('product_id', $productIds)->orWhereIn('ingredient_id', $productIds)->delete();
+            $recipeIds = DB::table('recipes')->whereIn('product_id', $productIds)->pluck('id');
+            DB::table('recipe_ingredients')->whereIn('recipe_id', $recipeIds)->orWhereIn('ingredient_id', $productIds)->delete();
             DB::table('recipes')->whereIn('product_id', $productIds)->delete();
             DB::table('products')->where('organization_id', $orgId)->delete();
         });

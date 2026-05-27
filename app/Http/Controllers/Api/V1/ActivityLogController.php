@@ -44,6 +44,8 @@ class ActivityLogController extends Controller
     {
         $validated = $request->validate([
             'tour_id' => ['nullable', 'exists:tours,id'],
+            'subject_type' => ['nullable', 'string', 'max:100'],
+            'subject_id' => ['nullable', 'integer'],
             'description' => ['required', 'string', 'max:2000'],
         ]);
 
@@ -51,6 +53,8 @@ class ActivityLogController extends Controller
             'organization_id' => $this->orgId(),
             'causer_id' => Auth::id(),
             'tour_id' => $validated['tour_id'] ?? null,
+            'subject_type' => $validated['subject_type'] ?? null,
+            'subject_id' => $validated['subject_id'] ?? null,
             'action' => 'note',
             'description' => $validated['description'],
         ]);

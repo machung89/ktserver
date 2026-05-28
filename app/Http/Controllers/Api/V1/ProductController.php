@@ -180,7 +180,7 @@ class ProductController extends Controller
 
         $orgId = $this->orgId();
         $updateExisting = (bool) $request->boolean('update_existing', false);
-        $allowedUpdateFields = ['name', 'unit', 'price', 'cost_price', 'unit2', 'barcode', 'description', 'category_name'];
+        $allowedUpdateFields = ['name', 'unit', 'price', 'cost_price', 'standard_price', 'unit2', 'barcode', 'description', 'category_name'];
         $updateFields = $updateExisting
             ? array_intersect($request->input('update_fields', $allowedUpdateFields), $allowedUpdateFields)
             : [];
@@ -239,6 +239,7 @@ class ProductController extends Controller
                     'unit' => trim($row['unit']),
                     'price' => (float) $row['price'],
                     'cost_price' => (float) $row['cost_price'],
+                    'standard_price' => isset($row['standard_price']) && $row['standard_price'] !== null && $row['standard_price'] !== '' ? (float) $row['standard_price'] : null,
                     'barcode' => $row['barcode'] ?: null,
                     'description' => $row['description'] ?: null,
                     'category_id' => $categoryId,

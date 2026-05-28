@@ -495,8 +495,8 @@ class SalesOrderController extends Controller
                 'tax_amount' => $taxAmount,
                 'discount_amount' => $orderDiscountAmount,
                 'total_amount' => $totalAmount,
-                'standard_total' => $standardTotal > 0 ? $standardTotal : null,
-                'employee_profit' => $standardTotal > 0 ? $totalAmount - $standardTotal : null,
+                'standard_total' => $standardTotal > 0 ? $standardTotal : 0,
+                'employee_profit' => $standardTotal > 0 ? $totalAmount - $standardTotal : 0,
             ]);
         });
 

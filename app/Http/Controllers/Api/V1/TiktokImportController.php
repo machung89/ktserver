@@ -84,16 +84,20 @@ class TiktokImportController extends Controller
 
             $existingOrder = SalesOrder::where('ref_id', (string) $orderId)->first();
             if ($existingOrder) {
+                // Không cho phép downgrade trạng thái (VD: Completed → Draft)
+                if ($this->statusLevel($mappedStatus) <= $this->statusLevel($existingOrder->status)) {
+                    continue;
+                }
+
                 try {
                     DB::transaction(function () use ($existingOrder, $mappedStatus) {
-                        if ($existingOrder->status === OrderStatus::Draft && $mappedStatus !== OrderStatus::Draft) {
+                        if ($existingOrder->status === OrderStatus::Draft) {
                             $existingOrder->load('items.product');
                             $this->salesOrderService->confirm($existingOrder);
                         }
 
-                        if ($mappedStatus !== $existingOrder->status) {
-                            $existingOrder->update(['status' => $mappedStatus]);
-                        }
+                        // statusLevel guard đảm bảo mappedStatus > existingStatus nên luôn update
+                        $existingOrder->update(['status' => $mappedStatus]);
                     });
                     $updated++;
                 } catch (\Throwable $e) {
@@ -236,19 +240,50 @@ class TiktokImportController extends Controller
     {
         $lower = mb_strtolower(trim($statusText));
 
-        if (str_contains($lower, 'cancel') || str_contains($lower, 'hủy')) {
+        if (str_contains($lower, 'cancel') || str_contains($lower, 'hủy') || str_contains($lower, 'huỷ')) {
             return OrderStatus::Cancelled;
         }
-        if (str_contains($lower, 'delivered') || str_contains($lower, 'completed') || str_contains($lower, 'hoàn thành')) {
+
+        // "Đã giao", "Đã giao hàng", "Hoàn thành", "Delivered", "Completed"
+        if (
+            str_contains($lower, 'đã giao') ||
+            str_contains($lower, 'da giao') ||
+            str_contains($lower, 'hoàn thành') ||
+            str_contains($lower, 'hoan thanh') ||
+            str_contains($lower, 'delivered') ||
+            str_contains($lower, 'completed')
+        ) {
             return OrderStatus::Completed;
         }
-        if (str_contains($lower, 'shipped') || str_contains($lower, 'in transit') || str_contains($lower, 'đang giao')) {
+
+        // "Đang giao hàng" → Shipping
+        if (str_contains($lower, 'đang giao') || str_contains($lower, 'out for delivery')) {
             return OrderStatus::Shipping;
         }
-        if (str_contains($lower, 'awaiting') || str_contains($lower, 'ready') || str_contains($lower, 'processing') || str_contains($lower, 'confirmed')) {
+
+        // "Đang trung chuyển", "Đang vận chuyển", "In transit", "Shipped"
+        if (
+            str_contains($lower, 'trung chuy') ||
+            str_contains($lower, 'vận chuyển') ||
+            str_contains($lower, 'van chuyen') ||
+            str_contains($lower, 'transit') ||
+            str_contains($lower, 'shipped')
+        ) {
             return OrderStatus::Confirmed;
         }
 
+        // "Đang chờ lấy hàng", default → Nháp
         return OrderStatus::Draft;
+    }
+
+    private function statusLevel(OrderStatus $status): int
+    {
+        return match ($status) {
+            OrderStatus::Draft => 0,
+            OrderStatus::Confirmed => 1,
+            OrderStatus::Shipping => 2,
+            OrderStatus::Completed => 3,
+            OrderStatus::Cancelled => 4,
+        };
     }
 }

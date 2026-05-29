@@ -29,6 +29,7 @@ class AuthController extends Controller
             'company_address' => ['nullable', 'string', 'max:255'],
             'business_mode' => ['required', 'in:retail,restaurant,tour'],
             'name' => ['required', 'string', 'max:255'],
+            'phone' => ['required', 'string', 'max:20', 'unique:users'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
         ]);
@@ -44,6 +45,7 @@ class AuthController extends Controller
             $user = User::create([
                 'organization_id' => $org->id,
                 'name' => $validated['name'],
+                'phone' => $validated['phone'],
                 'email' => $validated['email'],
                 'password' => Hash::make($validated['password']),
                 'position' => 'Quản trị viên',
@@ -73,22 +75,29 @@ class AuthController extends Controller
 
     public function login(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'string', 'email'],
+        $request->validate([
+            'login' => ['required', 'string'],
             'password' => ['required', 'string'],
         ]);
 
-        $user = User::with('organization')->where('email', $validated['email'])->first();
+        $loginValue = $request->input('login');
+        $isEmail = str_contains($loginValue, '@');
 
-        if (! $user || ! Hash::check($validated['password'], $user->password)) {
+        $user = User::withoutGlobalScopes()
+            ->with('organization')
+            ->when($isEmail, fn ($q) => $q->where('email', $loginValue))
+            ->when(! $isEmail, fn ($q) => $q->where('phone', $loginValue))
+            ->first();
+
+        if (! $user || ! Hash::check($request->input('password'), $user->password)) {
             throw ValidationException::withMessages([
-                'email' => ['Email hoặc mật khẩu không đúng.'],
+                'login' => ['Số điện thoại / email hoặc mật khẩu không đúng.'],
             ]);
         }
 
         if (! $user->is_active) {
             throw ValidationException::withMessages([
-                'email' => ['Tài khoản đã bị vô hiệu hóa.'],
+                'login' => ['Tài khoản đã bị vô hiệu hóa.'],
             ]);
         }
 

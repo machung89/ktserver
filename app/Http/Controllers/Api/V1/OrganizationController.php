@@ -138,6 +138,11 @@ class OrganizationController extends Controller
             )->delete();
             DB::table('fixed_assets')->where('organization_id', $orgId)->delete();
 
+            // Phiếu xuất kho
+            $exportIds = DB::table('warehouse_exports')->where('organization_id', $orgId)->pluck('id');
+            DB::table('warehouse_export_orders')->whereIn('warehouse_export_id', $exportIds)->delete();
+            DB::table('warehouse_exports')->where('organization_id', $orgId)->delete();
+
             // Đơn bán
             DB::table('sales_order_items')->whereIn(
                 'sales_order_id',
@@ -169,6 +174,12 @@ class OrganizationController extends Controller
             )->delete();
             DB::table('inventory_transactions')->where('organization_id', $orgId)->delete();
             DB::table('inventories')->where('organization_id', $orgId)->delete();
+
+            // Chương trình khuyến mại
+            $promotionIds = DB::table('promotions')->where('organization_id', $orgId)->pluck('id');
+            DB::table('promotion_products')->whereIn('promotion_id', $promotionIds)->delete();
+            DB::table('promotion_categories')->whereIn('promotion_id', $promotionIds)->delete();
+            DB::table('promotions')->where('organization_id', $orgId)->delete();
         });
 
         return response()->json(['message' => 'Đã xóa toàn bộ dữ liệu giao dịch']);

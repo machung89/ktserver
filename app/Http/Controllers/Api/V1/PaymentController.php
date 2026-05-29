@@ -36,6 +36,13 @@ class PaymentController extends Controller
             ->when($request->type, fn ($q, $v) => $q->where('type', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
+            ->when($request->search, function ($q, $v) {
+                $q->where(function ($q) use ($v) {
+                    $q->where('payment_number', 'like', "%{$v}%")
+                        ->orWhere('description', 'like', "%{$v}%")
+                        ->orWhereHas('company', fn ($cq) => $cq->where('name', 'like', "%{$v}%"));
+                });
+            })
             ->latest()
             ->paginate($request->filled('per_page') ? (int) $request->per_page : 20);
 
@@ -78,7 +85,11 @@ class PaymentController extends Controller
         if (! empty($validated['reference_type']) && ! empty($validated['reference_id'])) {
             $order = $validated['reference_type']::find($validated['reference_id']);
             if ($order) {
-                $remaining = (float) $order->total_amount - (float) $order->paid_amount;
+                $totalAmount = (float) $order->total_amount;
+                $paidAmount = (float) $order->paid_amount;
+                $remaining = $totalAmount < 0
+                    ? abs($totalAmount) - abs($paidAmount)
+                    : $totalAmount - $paidAmount;
                 if ((float) $validated['amount'] > $remaining + 0.01) {
                     throw ValidationException::withMessages([
                         'amount' => [sprintf(

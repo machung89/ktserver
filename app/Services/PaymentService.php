@@ -23,7 +23,11 @@ class PaymentService
             if (! empty($data['reference_type']) && ! empty($data['reference_id'])) {
                 $order = $data['reference_type']::lockForUpdate()->find($data['reference_id']);
                 if ($order) {
-                    $remaining = (float) $order->total_amount - (float) $order->paid_amount;
+                    $totalAmount = (float) $order->total_amount;
+                    $paidAmount = (float) $order->paid_amount;
+                    $remaining = $totalAmount < 0
+                        ? abs($totalAmount) - abs($paidAmount)
+                        : $totalAmount - $paidAmount;
                     if ((float) $data['amount'] > $remaining + 0.01) {
                         throw ValidationException::withMessages([
                             'amount' => [sprintf(

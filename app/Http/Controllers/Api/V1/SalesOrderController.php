@@ -99,6 +99,8 @@ class SalesOrderController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $isReturnOrder = (bool) $request->input('is_return_order', false);
+
         $validated = $request->validate([
             'company_id' => ['nullable', 'exists:companies,id'],
             'restaurant_table_id' => ['nullable', 'exists:restaurant_tables,id'],
@@ -110,7 +112,7 @@ class SalesOrderController extends Controller
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.warehouse_id' => ['required', 'exists:warehouses,id'],
-            'items.*.quantity' => ['required', 'numeric', 'min:0.001'],
+            'items.*.quantity' => ['required', 'numeric', $isReturnOrder ? 'max:-0.001' : 'min:0.001'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.cost_price' => ['nullable', 'numeric', 'min:0'],
             'items.*.discount_type' => ['nullable', 'in:percent,fixed'],
@@ -131,7 +133,7 @@ class SalesOrderController extends Controller
                     ->get()
                     ->keyBy('product_id');
 
-                if (! $allowNegativeStock) {
+                if (! $allowNegativeStock && ! $isReturnOrder) {
                     // Sản phẩm không có công thức: kiểm tra tồn kho trực tiếp
                     foreach ($validated['items'] as $item) {
                         if ($recipes->has($item['product_id'])) {

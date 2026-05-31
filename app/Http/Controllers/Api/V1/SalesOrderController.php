@@ -41,7 +41,7 @@ class SalesOrderController extends Controller
         $canViewAll = $user->hasPermission('sales.view_all');
         $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
 
-        $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable'])
+        $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable', 'returnOrder'])
             ->withExists('warehouseExports')
             ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
@@ -109,6 +109,7 @@ class SalesOrderController extends Controller
             'discount_type' => ['nullable', 'in:percent,fixed'],
             'discount_value' => ['nullable', 'numeric', 'min:0'],
             'promotion_id' => ['nullable', 'integer'],
+            'original_order_id' => ['nullable', 'exists:sales_orders,id'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.warehouse_id' => ['required', 'exists:warehouses,id'],
@@ -126,7 +127,7 @@ class SalesOrderController extends Controller
         $stockErrors = [];
 
         try {
-            $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, &$stockErrors) {
+            $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, $isReturnOrder, &$stockErrors) {
                 $itemProductIds = array_unique(array_column($validated['items'], 'product_id'));
                 $recipes = Recipe::with('ingredients')
                     ->whereIn('product_id', $itemProductIds)
@@ -216,6 +217,7 @@ class SalesOrderController extends Controller
                     'restaurant_table_id' => $validated['restaurant_table_id'] ?? null,
                     'order_date' => $validated['order_date'],
                     'notes' => $validated['notes'] ?? null,
+                    'original_order_id' => $validated['original_order_id'] ?? null,
                     'promotion_id' => $validated['promotion_id'] ?? null,
                     'discount_type' => $validated['discount_type'] ?? null,
                     'discount_value' => $validated['discount_value'] ?? 0,
@@ -342,7 +344,7 @@ class SalesOrderController extends Controller
             abort_unless(in_array($salesOrder->created_by, $viewableIds), 403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
-        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account']));
+        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'returnOrder', 'originalOrder']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource

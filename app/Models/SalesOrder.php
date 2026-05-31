@@ -13,9 +13,10 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
-#[Fillable(['order_number', 'ref_id', 'tracking_number', 'company_id', 'restaurant_table_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'standard_total', 'employee_profit', 'notes', 'promotion_id', 'organization_id', 'payment_status', 'paid_amount', 'created_by'])]
+#[Fillable(['order_number', 'ref_id', 'original_order_id', 'tracking_number', 'company_id', 'restaurant_table_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'total_amount', 'standard_total', 'employee_profit', 'notes', 'promotion_id', 'organization_id', 'payment_status', 'paid_amount', 'created_by'])]
 class SalesOrder extends Model
 {
     /** @use HasFactory<SalesOrderFactory> */
@@ -80,5 +81,15 @@ class SalesOrder extends Model
     public function warehouseExports(): BelongsToMany
     {
         return $this->belongsToMany(WarehouseExport::class, 'warehouse_export_orders');
+    }
+
+    public function originalOrder(): BelongsTo
+    {
+        return $this->belongsTo(SalesOrder::class, 'original_order_id');
+    }
+
+    public function returnOrder(): HasOne
+    {
+        return $this->hasOne(SalesOrder::class, 'original_order_id');
     }
 }

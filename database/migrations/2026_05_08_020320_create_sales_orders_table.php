@@ -20,7 +20,7 @@ return new class extends Migration
             $table->string('status')->default('draft')->comment('draft | confirmed | completed | cancelled');
             $table->decimal('subtotal', 18, 2)->default(0);
             $table->decimal('tax_amount', 18, 2)->default(0);
-            $table->decimal('total_amount', 18, 2)->default(0);
+            $table->decimal('total_amount', 18)->default(0);
             $table->text('notes')->nullable();
             $table->timestamps();
         });

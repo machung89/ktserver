@@ -5,6 +5,8 @@ namespace Database\Seeders;
 use App\Models\User;
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 class DatabaseSeeder extends Seeder
 {
@@ -17,7 +19,13 @@ class DatabaseSeeder extends Seeder
     {
         User::firstOrCreate(
             ['email' => 'test@example.com'],
-            User::factory()->make(['name' => 'Test User', 'email' => 'test@example.com'])->toArray()
+            [
+                'name' => 'Test User',
+                'phone' => '0900000000',
+                'password' => Hash::make('password'),
+                'remember_token' => Str::random(10),
+                'email_verified_at' => now(),
+            ]
         );
 
         $this->call([SystemAccountsSeeder::class, AccountSeeder::class, RolePermissionSeeder::class, BankSeeder::class, ProvinceSeeder::class]);

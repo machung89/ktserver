@@ -6,6 +6,7 @@ use App\Enums\OrderStatus;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PurchaseOrderResource;
+use App\Models\Product;
 use App\Models\PurchaseOrder;
 use App\Models\User;
 use App\Services\ActivityLogService;
@@ -49,6 +50,7 @@ class PurchaseOrderController extends Controller
             'warehouse_id' => ['required', 'exists:warehouses,id'],
             'order_date' => ['required', 'date'],
             'notes' => ['nullable', 'string'],
+            'update_cost_price' => ['sometimes', 'boolean'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.quantity' => ['required', 'numeric', 'min:0.001'],
@@ -89,6 +91,13 @@ class PurchaseOrderController extends Controller
         }
 
         $order->update(['subtotal' => $subtotal, 'tax_amount' => $taxAmount, 'total_amount' => $subtotal + $taxAmount]);
+
+        if (! empty($validated['update_cost_price'])) {
+            foreach ($validated['items'] as $item) {
+                Product::where('id', $item['product_id'])
+                    ->update(['cost_price' => $item['unit_price']]);
+            }
+        }
 
         $this->activityLog->log(
             $this->orgId(), Auth::id(),

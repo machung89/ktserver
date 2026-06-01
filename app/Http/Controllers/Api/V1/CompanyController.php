@@ -7,6 +7,8 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\CompanyResource;
 use App\Models\Company;
+use App\Models\Payment;
+use App\Models\PurchaseOrder;
 use App\Models\SalesOrder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -119,6 +121,22 @@ class CompanyController extends Controller
 
     public function destroy(Company $company): JsonResponse
     {
+        $salesCount = SalesOrder::where('company_id', $company->id)->count();
+        $purchaseCount = PurchaseOrder::where('company_id', $company->id)->count();
+        $paymentCount = Payment::where('company_id', $company->id)->count();
+
+        if ($salesCount + $purchaseCount + $paymentCount > 0) {
+            $parts = array_filter([
+                $salesCount > 0 ? "{$salesCount} đơn bán" : null,
+                $purchaseCount > 0 ? "{$purchaseCount} đơn nhập" : null,
+                $paymentCount > 0 ? "{$paymentCount} phiếu thu/chi" : null,
+            ]);
+
+            return response()->json([
+                'message' => 'Không thể xóa vì đang có liên kết: '.implode(', ', $parts).'. Vui lòng xóa các liên kết trước.',
+            ], 422);
+        }
+
         $company->delete();
 
         return response()->json(null, 204);

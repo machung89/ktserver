@@ -5,8 +5,11 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\ProductResource;
+use App\Models\InventoryTransactionItem;
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\PurchaseOrderItem;
+use App\Models\SalesOrderItem;
 use App\Services\ActivityLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -131,6 +134,22 @@ class ProductController extends Controller
 
     public function destroy(Product $product): JsonResponse
     {
+        $salesCount = SalesOrderItem::where('product_id', $product->id)->count();
+        $purchaseCount = PurchaseOrderItem::where('product_id', $product->id)->count();
+        $txCount = InventoryTransactionItem::where('product_id', $product->id)->count();
+
+        if ($salesCount + $purchaseCount + $txCount > 0) {
+            $parts = array_filter([
+                $salesCount > 0 ? "{$salesCount} dòng đơn bán" : null,
+                $purchaseCount > 0 ? "{$purchaseCount} dòng đơn nhập" : null,
+                $txCount > 0 ? "{$txCount} giao dịch kho" : null,
+            ]);
+
+            return response()->json([
+                'message' => 'Không thể xóa vì sản phẩm đang được sử dụng: '.implode(', ', $parts).'.',
+            ], 422);
+        }
+
         $code = $product->code;
         $name = $product->name;
         $id = $product->id;

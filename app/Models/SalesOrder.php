@@ -48,6 +48,11 @@ class SalesOrder extends Model
         return $this->belongsTo(Company::class);
     }
 
+    public function promotion(): BelongsTo
+    {
+        return $this->belongsTo(Promotion::class);
+    }
+
     public function restaurantTable(): BelongsTo
     {
         return $this->belongsTo(RestaurantTable::class);

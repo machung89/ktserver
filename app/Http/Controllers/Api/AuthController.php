@@ -8,6 +8,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Services\DefaultAccountsService;
 use App\Services\DefaultRolesService;
+use Database\Seeders\RolePermissionSeeder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -50,6 +51,10 @@ class AuthController extends Controller
                 'password' => Hash::make($validated['password']),
                 'position' => 'Quản trị viên',
             ]);
+
+            // Đảm bảo bộ permissions toàn cục tồn tại trước khi tạo role mặc định
+            // (phòng trường hợp production chưa chạy RolePermissionSeeder)
+            (new RolePermissionSeeder)->run();
 
             $this->defaultAccountsService->seedForOrganization($org->id);
             $this->defaultRolesService->seedForOrganization($org->id);

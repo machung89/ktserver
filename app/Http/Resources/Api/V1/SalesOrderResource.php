@@ -38,6 +38,8 @@ class SalesOrderResource extends JsonResource
                 fn () => $this->returnOrder !== null,
                 fn () => (bool) ($this->return_order_exists ?? false),
             ),
+            'promotion_id' => $this->promotion_id,
+            'promotion_name' => $this->whenLoaded('promotion', fn () => $this->promotion?->name),
             'ref_id' => $this->ref_id,
             'tracking_number' => $this->tracking_number,
             'notes' => $this->notes,

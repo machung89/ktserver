@@ -25,10 +25,13 @@ class DefaultRolesService
                 'permissions' => [
                     'dashboard.view', 'products.view', 'companies.view',
                     'inventory.view', 'warehouses.view',
-                    'purchases.view', 'sales.view',
-                    'payments.view', 'payments.create',
+                    'purchases.view', 'purchases.view_all',
+                    'sales.view', 'sales.view_all',
+                    'payments.view', 'payments.create', 'payments.delete',
                     'accounts.view', 'accounts.create', 'accounts.edit',
-                    'journal.view', 'reports.view',
+                    'assets.view', 'assets.create',
+                    'journal.view', 'journal.create',
+                    'reports.view', 'reports.view_profit',
                 ],
             ],
             [
@@ -49,8 +52,8 @@ class DefaultRolesService
                 'description' => 'Quản lý kho, nhập xuất hàng',
                 'permissions' => [
                     'dashboard.view', 'products.view',
-                    'warehouses.view', 'inventory.view',
-                    'purchases.view', 'purchases.confirm',
+                    'warehouses.view', 'inventory.view', 'inventory.adjust',
+                    'purchases.view', 'purchases.view_all', 'purchases.confirm',
                     'sales.view', 'sales.confirm',
                 ],
             ],

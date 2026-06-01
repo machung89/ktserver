@@ -43,17 +43,23 @@ class InventoryTransactionService
      * Cập nhật tồn kho và tính lại giá bình quân gia quyền (WAC) khi nhập.
      * Khi xuất (quantity < 0), giá bình quân không thay đổi.
      *
+     * Phải gọi trong DB::transaction() để lockForUpdate() có hiệu lực.
+     *
      * @return float avg_cost hiện tại sau khi cập nhật
      */
     public function updateInventoryBalance(int $warehouseId, int $productId, float $quantity, float $unitPrice = 0): float
     {
-        $inventory = Inventory::firstOrCreate(
-            ['warehouse_id' => $warehouseId, 'product_id' => $productId, 'organization_id' => app('orgId')],
-            ['quantity' => 0, 'avg_cost' => 0, 'min_quantity' => 0]
-        );
+        $orgId = app('orgId');
+        $key = ['warehouse_id' => $warehouseId, 'product_id' => $productId, 'organization_id' => $orgId];
+
+        // Đảm bảo bản ghi tồn tại trước khi lock
+        Inventory::firstOrCreate($key, ['quantity' => 0, 'avg_cost' => 0, 'min_quantity' => 0]);
+
+        // Lock bản ghi để tránh race condition khi nhiều request cùng nhập/xuất kho
+        $inventory = Inventory::where($key)->lockForUpdate()->first();
 
         if ($quantity > 0) {
-            // Nhập kho: tính lại giá bình quân gia quyền
+            // Nhập kho: tính lại giá bình quân gia quyền (WAC)
             $oldQty = (float) $inventory->quantity;
             $oldCost = (float) $inventory->avg_cost;
             $newTotal = ($oldQty * $oldCost) + ($quantity * $unitPrice);
@@ -65,7 +71,7 @@ class InventoryTransactionService
                 'avg_cost' => round($newAvgCost, 2),
             ]);
         } else {
-            // Xuất kho: chỉ trừ số lượng, giữ nguyên avg_cost
+            // Xuất kho: SQL UPDATE atomic, giữ nguyên avg_cost
             $inventory->increment('quantity', $quantity);
         }
 

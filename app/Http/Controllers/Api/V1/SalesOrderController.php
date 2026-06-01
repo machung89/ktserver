@@ -10,6 +10,7 @@ use App\Http\Resources\Api\V1\SalesOrderResource;
 use App\Models\Inventory;
 use App\Models\Organization;
 use App\Models\Product;
+use App\Models\Promotion;
 use App\Models\Recipe;
 use App\Models\RestaurantTable;
 use App\Models\SalesOrder;
@@ -108,7 +109,7 @@ class SalesOrderController extends Controller
             'notes' => ['nullable', 'string'],
             'discount_type' => ['nullable', 'in:percent,fixed'],
             'discount_value' => ['nullable', 'numeric', 'min:0'],
-            'promotion_id' => ['nullable', 'integer'],
+            'promotion_id' => ['nullable', 'integer', 'exists:promotions,id'],
             'original_order_id' => ['nullable', 'exists:sales_orders,id'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
@@ -125,6 +126,21 @@ class SalesOrderController extends Controller
         $org = Organization::find($orgId);
         $allowNegativeStock = $org->setting('allow_negative_stock', false);
         $stockErrors = [];
+
+        // Kiểm tra khuyến mại còn hiệu lực
+        if (! empty($validated['promotion_id'])) {
+            $promo = Promotion::find($validated['promotion_id']);
+            if (! $promo || ! $promo->is_active) {
+                throw ValidationException::withMessages(['promotion_id' => ['Khuyến mại không còn hiệu lực.']]);
+            }
+            $today = now()->toDateString();
+            if ($promo->start_date && $promo->start_date->toDateString() > $today) {
+                throw ValidationException::withMessages(['promotion_id' => ['Khuyến mại chưa bắt đầu.']]);
+            }
+            if ($promo->end_date && $promo->end_date->toDateString() < $today) {
+                throw ValidationException::withMessages(['promotion_id' => ['Khuyến mại đã hết hạn.']]);
+            }
+        }
 
         try {
             $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, $isReturnOrder, &$stockErrors) {
@@ -279,18 +295,14 @@ class SalesOrderController extends Controller
                         $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
                         foreach ($recipe->ingredients as $ingredient) {
                             $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
-                            $inv = Inventory::lockForUpdate()->firstOrCreate(
-                                ['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                                ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                            );
-                            $inv->increment('reserved_quantity', $ingQty);
+                            Inventory::ensureExists($ingredient->ingredient_id, $item['warehouse_id'], $orgId);
+                            Inventory::where(['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId])
+                                ->increment('reserved_quantity', $ingQty);
                         }
                     } else {
-                        $inventory = Inventory::lockForUpdate()->firstOrCreate(
-                            ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                            ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                        );
-                        $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                        Inventory::ensureExists($item['product_id'], $item['warehouse_id'], $orgId);
+                        Inventory::where(['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId])
+                            ->increment('reserved_quantity', (float) $item['quantity']);
                     }
                 }
 
@@ -344,7 +356,7 @@ class SalesOrderController extends Controller
             abort_unless(in_array($salesOrder->created_by, $viewableIds), 403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
-        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'returnOrder', 'originalOrder']));
+        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'returnOrder', 'originalOrder', 'promotion']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource
@@ -360,7 +372,7 @@ class SalesOrderController extends Controller
             'notes' => ['nullable', 'string'],
             'discount_type' => ['nullable', 'in:percent,fixed'],
             'discount_value' => ['nullable', 'numeric', 'min:0'],
-            'promotion_id' => ['nullable', 'integer'],
+            'promotion_id' => ['nullable', 'integer', 'exists:promotions,id'],
             'items' => ['sometimes', 'array', 'min:1'],
             'items.*.product_id' => ['required_with:items', 'exists:products,id'],
             'items.*.warehouse_id' => ['required_with:items', 'exists:warehouses,id'],
@@ -470,18 +482,14 @@ class SalesOrderController extends Controller
                     $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
                     foreach ($recipe->ingredients as $ingredient) {
                         $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
-                        $inv = Inventory::lockForUpdate()->firstOrCreate(
-                            ['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                            ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                        );
-                        $inv->increment('reserved_quantity', $ingQty);
+                        Inventory::ensureExists($ingredient->ingredient_id, $item['warehouse_id'], $orgId);
+                        Inventory::where(['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId])
+                            ->increment('reserved_quantity', $ingQty);
                     }
                 } else {
-                    $inv = Inventory::lockForUpdate()->firstOrCreate(
-                        ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                        ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                    );
-                    $inv->increment('reserved_quantity', (float) $item['quantity']);
+                    Inventory::ensureExists($item['product_id'], $item['warehouse_id'], $orgId);
+                    Inventory::where(['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId])
+                        ->increment('reserved_quantity', (float) $item['quantity']);
                 }
             }
 
@@ -780,18 +788,14 @@ class SalesOrderController extends Controller
                             $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
                             foreach ($recipe->ingredients as $ingredient) {
                                 $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
-                                $inv = Inventory::lockForUpdate()->firstOrCreate(
-                                    ['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                                    ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                                );
-                                $inv->increment('reserved_quantity', $ingQty);
+                                Inventory::ensureExists($ingredient->ingredient_id, $item['warehouse_id'], $orgId);
+                                Inventory::where(['product_id' => $ingredient->ingredient_id, 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId])
+                                    ->increment('reserved_quantity', $ingQty);
                             }
                         } else {
-                            $inventory = Inventory::lockForUpdate()->firstOrCreate(
-                                ['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId],
-                                ['quantity' => 0, 'reserved_quantity' => 0, 'min_quantity' => 0]
-                            );
-                            $inventory->increment('reserved_quantity', (float) $item['quantity']);
+                            Inventory::ensureExists($item['product_id'], $item['warehouse_id'], $orgId);
+                            Inventory::where(['product_id' => $item['product_id'], 'warehouse_id' => $item['warehouse_id'], 'organization_id' => $orgId])
+                                ->increment('reserved_quantity', (float) $item['quantity']);
                         }
                     }
 

@@ -2,6 +2,7 @@
 
 namespace Database\Factories;
 
+use App\Enums\TransactionType;
 use App\Models\InventoryTransaction;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
@@ -18,7 +19,9 @@ class InventoryTransactionFactory extends Factory
     public function definition(): array
     {
         return [
-            //
+            'type' => TransactionType::Adjustment,
+            'transaction_date' => now()->toDateString(),
+            'is_posted' => true,
         ];
     }
 }

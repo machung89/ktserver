@@ -71,6 +71,7 @@ class InventoryAdjustmentController extends Controller
                 if ($delta < 0 && $unitPrice === 0.0) {
                     $inv = Inventory::where('warehouse_id', $warehouseId)
                         ->where('product_id', $item['product_id'])
+                        ->lockForUpdate()
                         ->first();
                     $unitPrice = $inv ? (float) $inv->avg_cost : 0.0;
                 }

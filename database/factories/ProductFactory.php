@@ -22,7 +22,7 @@ class ProductFactory extends Factory
             'name' => $this->faker->words(3, true),
             'description' => $this->faker->sentence(),
             'unit' => $this->faker->randomElement(['cái', 'kg', 'hộp', 'lít', 'thùng']),
-            'category' => $this->faker->randomElement(['Thực phẩm', 'Điện tử', 'Văn phòng phẩm', 'Gia dụng']),
+            'category_id' => null,
             'price' => $this->faker->randomFloat(2, 10000, 10000000),
             'cost_price' => $this->faker->randomFloat(2, 5000, 8000000),
             'is_active' => true,

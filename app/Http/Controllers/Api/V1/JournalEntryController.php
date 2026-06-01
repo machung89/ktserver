@@ -8,6 +8,7 @@ use App\Http\Resources\Api\V1\JournalEntryResource;
 use App\Models\Account;
 use App\Models\JournalEntry;
 use App\Models\JournalEntryLine;
+use App\Services\JournalEntryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -15,6 +16,8 @@ use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 class JournalEntryController extends Controller
 {
     use ScopedByOrganization;
+
+    public function __construct(protected JournalEntryService $journalEntryService) {}
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -25,6 +28,40 @@ class JournalEntryController extends Controller
             ->paginate(30);
 
         return JournalEntryResource::collection($entries);
+    }
+
+    public function store(Request $request): JournalEntryResource
+    {
+        $validated = $request->validate([
+            'entry_date' => ['required', 'date'],
+            'description' => ['required', 'string'],
+            'lines' => ['required', 'array', 'min:2'],
+            'lines.*.account_code' => ['required', 'string', 'exists:accounts,code'],
+            'lines.*.description' => ['nullable', 'string'],
+            'lines.*.debit' => ['required', 'numeric', 'min:0'],
+            'lines.*.credit' => ['required', 'numeric', 'min:0'],
+        ]);
+
+        $entry = $this->journalEntryService->createManual(
+            description: $validated['description'],
+            entryDate: $validated['entry_date'],
+            lines: $validated['lines'],
+        );
+
+        return new JournalEntryResource($entry);
+    }
+
+    public function accounts(Request $request): JsonResponse
+    {
+        $accounts = Account::when(
+            $request->search,
+            fn ($q, $v) => $q->where('code', 'like', "%{$v}%")->orWhere('name', 'like', "%{$v}%")
+        )
+            ->orderBy('code')
+            ->limit(50)
+            ->get(['id', 'code', 'name', 'type']);
+
+        return response()->json(['data' => $accounts]);
     }
 
     public function show(JournalEntry $journalEntry): JournalEntryResource

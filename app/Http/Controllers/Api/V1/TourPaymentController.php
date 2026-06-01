@@ -117,19 +117,9 @@ class TourPaymentController extends Controller
         }
 
         if ($guideAdvanceId) {
-            $guideAdvance = TourGuideAdvance::findOrFail($guideAdvanceId);
-            abort_unless($guideAdvance->organization_id === $this->orgId(), 403);
-
-            $remaining = (float) $guideAdvance->amount - (float) $guideAdvance->used_amount;
-            if ((float) $tourPayment->amount > $remaining + 0.01) {
-                throw ValidationException::withMessages([
-                    'amount' => [sprintf(
-                        'Số tiền áp dụng (%s₫) vượt quá tạm ứng HĐV còn lại (%s₫).',
-                        number_format($tourPayment->amount, 0, ',', '.'),
-                        number_format(max(0, $remaining), 0, ',', '.')
-                    )],
-                ]);
-            }
+            // Kiểm tra sơ bộ quyền sở hữu trước khi vào transaction
+            $guideAdvanceCheck = TourGuideAdvance::findOrFail($guideAdvanceId);
+            abort_unless($guideAdvanceCheck->organization_id === $this->orgId(), 403);
         }
 
         DB::transaction(function () use ($tourPayment, $useSupplierAdvance, $guideAdvanceId) {
@@ -144,7 +134,19 @@ class TourPaymentController extends Controller
 
             if ($guideAdvanceId) {
                 // Dùng tạm ứng HĐV: Dr 331 / Cr 141
+                // Lock trước khi kiểm tra số dư để tránh race condition
                 $guideAdvance = TourGuideAdvance::lockForUpdate()->find($guideAdvanceId);
+
+                $remaining = (float) $guideAdvance->amount - (float) $guideAdvance->used_amount;
+                if ((float) $tourPayment->amount > $remaining + 0.01) {
+                    throw ValidationException::withMessages([
+                        'amount' => [sprintf(
+                            'Số tiền áp dụng (%s₫) vượt quá tạm ứng HĐV còn lại (%s₫).',
+                            number_format($tourPayment->amount, 0, ',', '.'),
+                            number_format(max(0, $remaining), 0, ',', '.')
+                        )],
+                    ]);
+                }
 
                 $payment = Payment::create([
                     'payment_number' => 'PC'.str_pad(

@@ -31,11 +31,11 @@ class EmployeeController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users',
             'password' => ['required', Password::min(8)],
-            'phone' => 'nullable|string|max:20',
+            'phone' => 'required|string|max:20|unique:users',
             'department' => 'nullable|string|max:100',
             'position' => 'nullable|string|max:100',
             'is_active' => 'boolean',
-            'role_ids' => 'nullable|array',
+            'role_ids' => 'required|array|min:1',
             'role_ids.*' => 'exists:roles,id',
         ]);
 
@@ -63,7 +63,7 @@ class EmployeeController extends Controller
             'name' => 'sometimes|required|string|max:255',
             'email' => "sometimes|required|email|unique:users,email,{$employee->id}",
             'password' => ['nullable', Password::min(8)],
-            'phone' => 'nullable|string|max:20',
+            'phone' => "sometimes|required|string|max:20|unique:users,phone,{$employee->id}",
             'department' => 'nullable|string|max:100',
             'position' => 'nullable|string|max:100',
             'is_active' => 'boolean',

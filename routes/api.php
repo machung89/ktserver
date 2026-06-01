@@ -220,7 +220,9 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('journal-entries', [JournalEntryController::class, 'index']);
             Route::get('journal-entries/{journalEntry}', [JournalEntryController::class, 'show']);
             Route::get('ledger/{accountCode}', [JournalEntryController::class, 'ledger']);
+            Route::get('accounts-search', [JournalEntryController::class, 'accounts']);
         });
+        Route::post('journal-entries', [JournalEntryController::class, 'store'])->middleware('permission:journal.create');
 
         // Báo cáo
         Route::middleware('permission:reports.view')->group(function () {

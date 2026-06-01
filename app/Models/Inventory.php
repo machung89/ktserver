@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\DB;
 
 #[Fillable(['product_id', 'warehouse_id', 'quantity', 'avg_cost', 'reserved_quantity', 'min_quantity', 'organization_id'])]
 class Inventory extends Model
@@ -33,6 +34,25 @@ class Inventory extends Model
     public function getAvailableQuantityAttribute(): float
     {
         return max(0, (float) $this->quantity - (float) $this->reserved_quantity);
+    }
+
+    /**
+     * Đảm bảo bản ghi tồn kho tồn tại mà không gây deadlock khi nhiều request đồng thời.
+     * Dùng INSERT IGNORE thay vì firstOrCreate để tránh gap lock trên InnoDB.
+     */
+    public static function ensureExists(int $productId, int $warehouseId, int $orgId): void
+    {
+        DB::table('inventories')->insertOrIgnore([
+            'product_id' => $productId,
+            'warehouse_id' => $warehouseId,
+            'organization_id' => $orgId,
+            'quantity' => 0,
+            'avg_cost' => 0,
+            'reserved_quantity' => 0,
+            'min_quantity' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     public function product(): BelongsTo

@@ -278,8 +278,9 @@ class SalesOrderService
 
             if ($totalRevenue > 0) {
                 $desc = "Hàng bán bị trả lại - {$order->order_number}";
+                // Đảo chiều bút toán bán hàng: Nợ 511 / Có 131 + Nợ 156 / Có 632
                 $lines = [
-                    ['account_code' => '5212', 'description' => $desc, 'debit' => $totalRevenue, 'credit' => 0],
+                    ['account_code' => '511', 'description' => $desc, 'debit' => $totalRevenue, 'credit' => 0],
                     ['account_code' => '131', 'description' => $desc, 'debit' => 0, 'credit' => $totalRevenue],
                 ];
 

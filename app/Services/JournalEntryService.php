@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Account;
 use App\Models\JournalEntry;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Validation\ValidationException;
 
 class JournalEntryService
 {
@@ -13,6 +14,8 @@ class JournalEntryService
      */
     public function create(string $description, string $entryDate, Model $reference, array $lines): JournalEntry
     {
+        $this->assertBalanced($lines);
+
         $entry = JournalEntry::create([
             'entry_number' => $this->generateEntryNumber(),
             'entry_date' => $entryDate,
@@ -24,22 +27,27 @@ class JournalEntryService
         $entry->reference()->associate($reference);
         $entry->save();
 
-        $accountCache = [];
+        $this->writeLines($entry, $lines);
 
-        foreach ($lines as $line) {
-            $code = $line['account_code'];
+        return $entry->load('lines.account');
+    }
 
-            if (! isset($accountCache[$code])) {
-                $accountCache[$code] = Account::where('code', $code)->firstOrFail();
-            }
+    /**
+     * @param  array<array{account_code: string, description: string, debit: float, credit: float}>  $lines
+     */
+    public function createManual(string $description, string $entryDate, array $lines): JournalEntry
+    {
+        $this->assertBalanced($lines);
 
-            $entry->lines()->create([
-                'account_id' => $accountCache[$code]->id,
-                'description' => $line['description'] ?? null,
-                'debit_amount' => $line['debit'] ?? 0,
-                'credit_amount' => $line['credit'] ?? 0,
-            ]);
-        }
+        $entry = JournalEntry::create([
+            'entry_number' => $this->generateEntryNumber(),
+            'entry_date' => $entryDate,
+            'description' => $description,
+            'is_posted' => true,
+            'organization_id' => app('orgId'),
+        ]);
+
+        $this->writeLines($entry, $lines);
 
         return $entry->load('lines.account');
     }
@@ -49,24 +57,10 @@ class JournalEntryService
      */
     public function updateLines(JournalEntry $entry, array $lines): void
     {
+        $this->assertBalanced($lines);
+
         $entry->lines()->delete();
-
-        $accountCache = [];
-
-        foreach ($lines as $line) {
-            $code = $line['account_code'];
-
-            if (! isset($accountCache[$code])) {
-                $accountCache[$code] = Account::where('code', $code)->firstOrFail();
-            }
-
-            $entry->lines()->create([
-                'account_id' => $accountCache[$code]->id,
-                'description' => $line['description'] ?? null,
-                'debit_amount' => $line['debit'] ?? 0,
-                'credit_amount' => $line['credit'] ?? 0,
-            ]);
-        }
+        $this->writeLines($entry, $lines);
     }
 
     public function deleteByReference(Model $reference): void
@@ -77,6 +71,46 @@ class JournalEntryService
                 $entry->lines()->delete();
                 $entry->delete();
             });
+    }
+
+    /**
+     * @param  array<array{debit: float, credit: float}>  $lines
+     *
+     * @throws ValidationException
+     */
+    private function assertBalanced(array $lines): void
+    {
+        $totalDebit = round(array_sum(array_column($lines, 'debit')), 2);
+        $totalCredit = round(array_sum(array_column($lines, 'credit')), 2);
+
+        if ($totalDebit !== $totalCredit) {
+            throw ValidationException::withMessages([
+                'lines' => ["Bút toán chưa cân bằng: tổng Nợ ({$totalDebit}) ≠ tổng Có ({$totalCredit})."],
+            ]);
+        }
+    }
+
+    /**
+     * @param  array<array{account_code: string, description: string, debit: float, credit: float}>  $lines
+     */
+    private function writeLines(JournalEntry $entry, array $lines): void
+    {
+        $accountCache = [];
+
+        foreach ($lines as $line) {
+            $code = $line['account_code'];
+
+            if (! isset($accountCache[$code])) {
+                $accountCache[$code] = Account::where('code', $code)->firstOrFail();
+            }
+
+            $entry->lines()->create([
+                'account_id' => $accountCache[$code]->id,
+                'description' => $line['description'] ?? null,
+                'debit_amount' => $line['debit'] ?? 0,
+                'credit_amount' => $line['credit'] ?? 0,
+            ]);
+        }
     }
 
     private function generateEntryNumber(): string

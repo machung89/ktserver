@@ -65,7 +65,10 @@ class RolePermissionSeeder extends Seeder
                 ['assets.view', 'Xem tài sản cố định'],
                 ['assets.create', 'Thêm / ghi sổ khấu hao'],
             ],
-            'journal' => [['journal.view', 'Xem nhật ký']],
+            'journal' => [
+                ['journal.view', 'Xem nhật ký'],
+                ['journal.create', 'Tạo bút toán thủ công'],
+            ],
             'promotions' => [
                 ['promotions.view', 'Xem chương trình khuyến mại'],
                 ['promotions.create', 'Thêm khuyến mại'],

@@ -152,9 +152,12 @@ class TiktokImportController extends Controller
                             'quantity' => (float) $row['quantity'],
                             'unit_price' => (float) $row['unit_price'],
                             'cost_price' => (float) ($product->cost_price ?? 0),
+                            'standard_price' => (float) ($product->standard_price ?? 0),
                             'discount_pct' => (float) ($row['discount_pct'] ?? 0),
                         ];
                     }
+
+                    $standardTotal = 0;
 
                     if (! empty($notFound)) {
                         throw new \RuntimeException('Không tìm thấy sản phẩm SKU: '.implode(', ', array_unique($notFound)));
@@ -191,6 +194,10 @@ class TiktokImportController extends Controller
                         $discountAmount = $base * $discountPct / 100;
                         $amount = $base - $discountAmount;
                         $subtotal += $amount;
+                        $stdPrice = (float) ($item['standard_price'] ?? 0);
+                        if ($stdPrice > 0) {
+                            $standardTotal += (float) $item['quantity'] * $stdPrice;
+                        }
 
                         $order->items()->create([
                             'product_id' => $item['product_id'],
@@ -198,6 +205,7 @@ class TiktokImportController extends Controller
                             'quantity' => $item['quantity'],
                             'unit_price' => $item['unit_price'],
                             'cost_price' => $item['cost_price'],
+                            'standard_price' => $item['standard_price'] ?? 0,
                             'tax_rate' => 0,
                             'discount_type' => $discountPct > 0 ? 'percent' : null,
                             'discount_value' => $discountPct,
@@ -210,7 +218,12 @@ class TiktokImportController extends Controller
                         )->increment('reserved_quantity', (float) $item['quantity']);
                     }
 
-                    $order->update(['subtotal' => $subtotal, 'total_amount' => $subtotal]);
+                    $order->update([
+                        'subtotal' => $subtotal,
+                        'total_amount' => $subtotal,
+                        'standard_total' => $standardTotal,
+                        'employee_profit' => $standardTotal > 0 ? $subtotal - $standardTotal : 0,
+                    ]);
 
                     if ($mappedStatus !== OrderStatus::Draft) {
                         $order->load('items.product');

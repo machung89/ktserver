@@ -36,6 +36,7 @@ class TiktokImportController extends Controller
             'rows.*.quantity' => ['required', 'numeric', 'min:0.001'],
             'rows.*.unit_price' => ['required', 'numeric', 'min:0'],
             'rows.*.discount_pct' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'rows.*.subtotal_after_discount' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         $orgId = $this->orgId();

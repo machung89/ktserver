@@ -259,6 +259,20 @@ class PurchaseOrderController extends Controller
         return new PurchaseOrderResource($result);
     }
 
+    public function revertToDraft(PurchaseOrder $purchaseOrder): PurchaseOrderResource
+    {
+        $result = $this->purchaseOrderService->revertToDraft($purchaseOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'purchase_order_reverted',
+            "Hoàn về nháp đơn nhập {$purchaseOrder->order_number} — đã hủy bút toán và tồn kho",
+            null, [], 'purchase_order', $purchaseOrder->id
+        );
+
+        return new PurchaseOrderResource($result->load(['company', 'warehouse', 'items.product.units']));
+    }
+
     public function bulkConfirm(Request $request): JsonResponse
     {
         $validated = $request->validate([

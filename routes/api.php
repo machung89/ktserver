@@ -175,6 +175,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('purchases/{purchaseOrder}/ship', [PurchaseOrderController::class, 'ship'])->middleware('permission:purchases.confirm');
         Route::post('purchases/{purchaseOrder}/complete', [PurchaseOrderController::class, 'complete'])->middleware('permission:purchases.confirm');
         Route::post('purchases/{purchaseOrder}/cancel', [PurchaseOrderController::class, 'cancel'])->middleware('permission:purchases.cancel');
+        Route::post('purchases/{purchaseOrder}/revert-to-draft', [PurchaseOrderController::class, 'revertToDraft'])->middleware('permission:purchases.confirm');
 
         // Khuyến mại
         Route::get('promotions/applicable', [PromotionController::class, 'applicable'])->middleware('permission:sales.create');

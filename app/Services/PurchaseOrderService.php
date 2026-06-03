@@ -4,6 +4,10 @@ namespace App\Services;
 
 use App\Enums\OrderStatus;
 use App\Enums\TransactionType;
+use App\Models\Inventory;
+use App\Models\InventoryTransaction;
+use App\Models\JournalEntry;
+use App\Models\Payment;
 use App\Models\PurchaseOrder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -75,6 +79,79 @@ class PurchaseOrderService
                 reference: $order,
                 lines: $lines,
             );
+
+            return $order->fresh(['company', 'warehouse', 'items.product']);
+        });
+    }
+
+    /**
+     * Chuyển đơn nhập hoàn thành/xác nhận về nháp, đồng thời:
+     * - Đảo bút toán kế toán (xóa journal entry liên kết)
+     * - Đảo tồn kho (xóa inventory transaction + trừ lại số lượng / điều chỉnh avg_cost)
+     * - Hủy các phiếu chi draft liên kết (không xóa phiếu đã được duyệt vì đã ghi sổ)
+     *
+     * Điều kiện: đơn chưa được thanh toán (paid_amount = 0) và không có phiếu chi đã duyệt.
+     */
+    public function revertToDraft(PurchaseOrder $order): PurchaseOrder
+    {
+        return DB::transaction(function () use ($order) {
+            $order = PurchaseOrder::with('items')->lockForUpdate()->find($order->id);
+
+            if (! in_array($order->status, [OrderStatus::Confirmed, OrderStatus::Completed])) {
+                throw ValidationException::withMessages(['status' => ['Chỉ có thể hoàn về nháp từ trạng thái đã xác nhận hoặc hoàn thành.']]);
+            }
+
+            // Chặn nếu đã có thanh toán được duyệt
+            $approvedPayments = Payment::where('reference_type', PurchaseOrder::class)
+                ->where('reference_id', $order->id)
+                ->where('status', 'approved')
+                ->count();
+
+            if ($approvedPayments > 0) {
+                throw ValidationException::withMessages(['status' => ['Không thể hoàn về nháp: đơn đã có phiếu thanh toán được duyệt. Vui lòng hủy phiếu thanh toán trước.']]);
+            }
+
+            // 1. Xóa bút toán liên kết
+            $journals = JournalEntry::where('reference_type', PurchaseOrder::class)
+                ->where('reference_id', $order->id)
+                ->get();
+
+            foreach ($journals as $journal) {
+                $journal->lines()->delete();
+                $journal->delete();
+            }
+
+            // 2. Đảo tồn kho
+            $transactions = InventoryTransaction::where('reference_type', PurchaseOrder::class)
+                ->where('reference_id', $order->id)
+                ->with('items')
+                ->get();
+
+            foreach ($transactions as $transaction) {
+                foreach ($transaction->items as $txItem) {
+                    $this->inventoryTransactionService->updateInventoryBalance(
+                        $transaction->warehouse_id,
+                        $txItem->product_id,
+                        -(float) $txItem->quantity, // đảo ngược: trừ lại số đã nhập
+                        0,                           // avg_cost không điều chỉnh khi xuất
+                    );
+                }
+                $transaction->items()->delete();
+                $transaction->delete();
+            }
+
+            // 3. Hủy phiếu chi draft (chưa duyệt)
+            Payment::where('reference_type', PurchaseOrder::class)
+                ->where('reference_id', $order->id)
+                ->where('status', 'draft')
+                ->delete();
+
+            // 4. Reset trạng thái + công nợ
+            $order->update([
+                'status' => OrderStatus::Draft,
+                'paid_amount' => 0,
+                'payment_status' => 'unpaid',
+            ]);
 
             return $order->fresh(['company', 'warehouse', 'items.product']);
         });

@@ -80,7 +80,13 @@ class SalesOrderService
                         'organization_id' => $orgId,
                     ])->first();
 
-                    $item->update(['cost_price' => $inventory ? (float) $inventory->avg_cost : 0]);
+                    // Ưu tiên avg_cost của tồn kho; nếu = 0 (chưa nhập lần nào hoặc tồn âm)
+                    // thì fallback về cost_price của sản phẩm để tránh giá vốn ảo = 0.
+                    $avgCost = $inventory ? (float) $inventory->avg_cost : 0;
+                    if ($avgCost <= 0) {
+                        $avgCost = (float) ($item->product->cost_price ?? 0);
+                    }
+                    $item->update(['cost_price' => $avgCost]);
                 }
             }
 

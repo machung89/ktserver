@@ -98,7 +98,12 @@ class OrganizationController extends Controller
         $request->validate(['confirm' => ['required', 'string', 'in:XOA']]);
 
         $orgId = $this->orgId();
-        $companyIds = DB::table('companies')->where('organization_id', $orgId)->pluck('id');
+
+        // Giữ lại nhân viên (type = employee) vì liên kết với tài khoản user
+        $companyIds = DB::table('companies')
+            ->where('organization_id', $orgId)
+            ->where('type', '!=', 'employee')
+            ->pluck('id');
 
         if ($companyIds->isEmpty()) {
             return response()->json(['message' => 'Không có đối tác nào để xóa']);
@@ -108,10 +113,10 @@ class OrganizationController extends Controller
             DB::table('sales_orders')->where('organization_id', $orgId)->whereIn('company_id', $companyIds)->update(['company_id' => null]);
             DB::table('purchase_orders')->where('organization_id', $orgId)->whereIn('company_id', $companyIds)->update(['company_id' => null]);
             DB::table('payments')->where('organization_id', $orgId)->whereIn('company_id', $companyIds)->update(['company_id' => null]);
-            DB::table('companies')->where('organization_id', $orgId)->delete();
+            DB::table('companies')->whereIn('id', $companyIds)->delete();
         });
 
-        return response()->json(['message' => 'Đã xóa toàn bộ đối tác']);
+        return response()->json(['message' => 'Đã xóa toàn bộ đối tác (giữ lại nhân viên)']);
     }
 
     public function resetData(Request $request): JsonResponse

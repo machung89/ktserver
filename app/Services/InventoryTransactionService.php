@@ -59,19 +59,31 @@ class InventoryTransactionService
         $inventory = Inventory::where($key)->lockForUpdate()->first();
 
         if ($quantity > 0) {
-            // Nhập kho: tính lại giá bình quân gia quyền (WAC)
+            // Nhập kho: tính lại giá bình quân gia quyền (WAC).
+            // Khi tồn âm (bán trước nhập sau), phần âm đã được xuất/tính giá vốn rồi
+            // → chỉ tính WAC trên phần tồn không âm (max 0) để tránh avg_cost bị sai.
             $oldQty = (float) $inventory->quantity;
             $oldCost = (float) $inventory->avg_cost;
-            $newTotal = ($oldQty * $oldCost) + ($quantity * $unitPrice);
             $newQty = $oldQty + $quantity;
-            $newAvgCost = $newQty > 0 ? $newTotal / $newQty : $unitPrice;
+
+            if ($oldQty >= 0) {
+                // Trường hợp bình thường
+                $newTotal = ($oldQty * $oldCost) + ($quantity * $unitPrice);
+                $newAvgCost = $newQty > 0 ? $newTotal / $newQty : $unitPrice;
+            } elseif ($newQty <= 0) {
+                // Vẫn còn âm sau khi nhập → giữ nguyên avg_cost
+                $newAvgCost = $oldCost ?: $unitPrice;
+            } else {
+                // Tồn âm, nhập vào vượt qua 0 → toàn bộ tồn dương còn lại từ lần nhập này
+                $newAvgCost = $unitPrice;
+            }
 
             $inventory->update([
                 'quantity' => $newQty,
                 'avg_cost' => round($newAvgCost, 2),
             ]);
         } else {
-            // Xuất kho: SQL UPDATE atomic, giữ nguyên avg_cost
+            // Xuất kho: giữ nguyên avg_cost (WAC không đổi khi xuất)
             $inventory->increment('quantity', $quantity);
         }
 

@@ -88,17 +88,31 @@ class ShopeeImportController extends Controller
             // If order already exists by ref_id → confirm if transitioning from Draft, then update status
             $existingOrder = SalesOrder::where('ref_id', (string) $orderId)->first();
             if ($existingOrder) {
-                try {
-                    DB::transaction(function () use ($existingOrder, $mappedStatus) {
-                        if ($existingOrder->status === OrderStatus::Draft && $mappedStatus !== OrderStatus::Draft) {
-                            $existingOrder->load('items.product');
-                            $this->salesOrderService->confirm($existingOrder);
-                        }
+                // Bỏ qua nếu trạng thái không thay đổi hoặc đã hủy rồi
+                if ($existingOrder->status === $mappedStatus || $existingOrder->status === OrderStatus::Cancelled) {
+                    continue;
+                }
 
-                        if ($mappedStatus !== $existingOrder->status) {
+                // Không cho phép downgrade (trừ trường hợp chuyển về Cancelled)
+                if ($mappedStatus !== OrderStatus::Cancelled
+                    && $this->statusLevel($mappedStatus) <= $this->statusLevel($existingOrder->status)
+                ) {
+                    continue;
+                }
+
+                try {
+                    if ($mappedStatus === OrderStatus::Cancelled) {
+                        // Huỷ đơn: rollback kho + bút toán nếu đã confirmed/completed
+                        $this->salesOrderService->cancel($existingOrder);
+                    } else {
+                        DB::transaction(function () use ($existingOrder, $mappedStatus) {
+                            if ($existingOrder->status === OrderStatus::Draft) {
+                                $existingOrder->load('items.product');
+                                $this->salesOrderService->confirm($existingOrder);
+                            }
                             $existingOrder->update(['status' => $mappedStatus]);
-                        }
-                    });
+                        });
+                    }
                     $updated++;
                 } catch (\Throwable $e) {
                     $failed++;
@@ -263,6 +277,17 @@ class ShopeeImportController extends Controller
             'cancelled' => $cancelled,
             'errors' => $errors,
         ]);
+    }
+
+    private function statusLevel(OrderStatus $status): int
+    {
+        return match ($status) {
+            OrderStatus::Draft => 0,
+            OrderStatus::Confirmed => 1,
+            OrderStatus::Shipping => 2,
+            OrderStatus::Completed => 3,
+            OrderStatus::Cancelled => 4,
+        };
     }
 
     private function resolveStatus(string $statusText): OrderStatus

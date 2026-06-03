@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Enums\OrderStatus;
 use App\Enums\TransactionType;
 use App\Models\Inventory;
+use App\Models\InventoryTransaction;
+use App\Models\JournalEntry;
 use App\Models\Organization;
 use App\Models\Recipe;
 use App\Models\SalesOrder;
@@ -312,8 +314,38 @@ class SalesOrderService
     {
         return DB::transaction(function () use ($order) {
             if ($order->status === OrderStatus::Draft) {
+                // Đơn nháp: giải phóng reserved, không cần rollback kho/bút toán
                 $order->loadMissing('items');
                 $this->releaseReservation($order);
+            } elseif (in_array($order->status, [OrderStatus::Confirmed, OrderStatus::Shipping, OrderStatus::Completed])) {
+                // Đơn đã xác nhận/giao/hoàn thành: đảo tồn kho và bút toán
+                $transactions = InventoryTransaction::where('reference_type', SalesOrder::class)
+                    ->where('reference_id', $order->id)
+                    ->with('items')
+                    ->get();
+
+                foreach ($transactions as $transaction) {
+                    foreach ($transaction->items as $txItem) {
+                        // Đảo ngược: trả lại số lượng đã xuất (quantity âm → cộng lại)
+                        $this->inventoryTransactionService->updateInventoryBalance(
+                            $transaction->warehouse_id,
+                            $txItem->product_id,
+                            -(float) $txItem->quantity,
+                            0,
+                        );
+                    }
+                    $transaction->items()->delete();
+                    $transaction->delete();
+                }
+
+                $journals = JournalEntry::where('reference_type', SalesOrder::class)
+                    ->where('reference_id', $order->id)
+                    ->get();
+
+                foreach ($journals as $journal) {
+                    $journal->lines()->delete();
+                    $journal->delete();
+                }
             }
 
             $order->update(['status' => OrderStatus::Cancelled]);

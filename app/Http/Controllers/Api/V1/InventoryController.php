@@ -19,14 +19,16 @@ class InventoryController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $query = Inventory::with(['product', 'warehouse'])
+        $query = Inventory::with(['product.category', 'warehouse'])
             ->when($request->warehouse_id, fn ($q, $v) => $q->where('warehouse_id', $v))
             ->when($request->product_id, fn ($q, $v) => $q->where('product_id', $v))
-            ->when($request->boolean('low_stock', false), fn ($q) => $q->whereColumn('quantity', '<=', 'min_quantity'));
+            ->when($request->boolean('low_stock', false), fn ($q) => $q->whereColumn('quantity', '<=', 'min_quantity'))
+            ->when($request->search, fn ($q, $v) => $q->whereHas('product', fn ($pq) => $pq->where('name', 'like', "%{$v}%")->orWhere('code', 'like', "%{$v}%")))
+            ->when($request->category_id, fn ($q, $v) => $q->whereHas('product', fn ($pq) => $pq->where('category_id', $v)));
 
-        $inventory = $request->filled('per_page')
-            ? $query->paginate((int) $request->per_page)
-            : $query->paginate(50);
+        $perPage = $request->filled('per_page') ? (int) $request->per_page : 50;
+
+        $inventory = $query->paginate($perPage);
 
         return InventoryResource::collection($inventory);
     }

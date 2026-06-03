@@ -135,23 +135,16 @@ class ShopeeImportController extends Controller
 
             try {
                 DB::transaction(function () use ($orderId, $orderRows, $orgId, $warehouse, $productsByCode, $mappedStatus, $firstRow) {
-                    $buyerName = trim($firstRow['buyer'] ?? '') ?: 'Khách Shopee';
-                    $shippingAddress = trim($firstRow['shipping_address'] ?? '') ?: null;
                     $trackingNumber = trim($firstRow['tracking_number'] ?? '') ?: null;
 
-                    $company = Company::where('name', $buyerName)
-                        ->where('type', CompanyType::Customer)
-                        ->first();
-
-                    if (! $company) {
-                        $company = Company::create([
+                    $company = Company::firstOrCreate(
+                        [
                             'organization_id' => $orgId,
-                            'name' => $buyerName,
-                            'address' => $shippingAddress,
+                            'name' => 'Khách Shopee',
                             'type' => CompanyType::Customer,
-                            'is_active' => true,
-                        ]);
-                    }
+                        ],
+                        ['is_active' => true]
+                    );
 
                     $items = [];
                     $notFound = [];

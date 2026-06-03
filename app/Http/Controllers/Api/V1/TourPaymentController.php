@@ -6,9 +6,11 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Models\JournalEntry;
 use App\Models\Payment;
+use App\Models\Tour;
 use App\Models\TourGuideAdvance;
 use App\Models\TourPaymentRequest;
 use App\Models\TourService;
+use App\Models\User;
 use App\Services\ActivityLogService;
 use App\Services\JournalEntryService;
 use App\Services\PaymentService;
@@ -33,6 +35,14 @@ class TourPaymentController extends Controller
         $items = TourPaymentRequest::with(['tour', 'service', 'supplier', 'requestedBy', 'approvedBy'])
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->tour_id, fn ($q, $v) => $q->where('tour_id', $v))
+            ->when($request->search, function ($q, $v) {
+                $q->where(function ($q) use ($v) {
+                    $q->where('notes', 'like', "%{$v}%")
+                        ->orWhereHas('tour', fn ($tq) => $tq->where('tour_number', 'like', "%{$v}%")->orWhere('name', 'like', "%{$v}%"))
+                        ->orWhereHas('service', fn ($sq) => $sq->where('name', 'like', "%{$v}%"))
+                        ->orWhereHas('supplier', fn ($sq) => $sq->where('name', 'like', "%{$v}%"));
+                });
+            })
             ->latest()
             ->paginate($request->filled('per_page') ? (int) $request->per_page : 30);
 
@@ -43,6 +53,107 @@ class TourPaymentController extends Controller
                 'per_page' => $items->perPage(),
                 'total' => $items->total(),
                 'last_page' => $items->lastPage(),
+            ],
+        ]);
+    }
+
+    /**
+     * Sổ thu/chi tour: mọi phiếu thu/chi (Payment) phát sinh từ tour, gồm cả phiếu
+     * nháp đang chờ duyệt để duyệt ngay tại bảng (giống trang Thu/chi).
+     */
+    public function cashflow(Request $request): JsonResponse
+    {
+        $categoryFor = fn (?string $requestType): string => match ($requestType) {
+            'guide_advance' => 'Dự chi HĐV',
+            'settlement' => 'QT HĐV - Chi bổ sung',
+            'settlement_receipt' => 'QT HĐV - Thu hoàn',
+            default => 'Chi dịch vụ NCC',
+        };
+
+        $base = Payment::query()
+            ->whereIn('reference_type', [Tour::class, TourPaymentRequest::class])
+            ->when($request->type, fn ($q, $v) => $q->where('type', $v))
+            ->when($request->status, fn ($q, $v) => $q->where('status', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('payment_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('payment_date', '<=', $v))
+            ->when($request->search, function ($q, $v) {
+                $q->where(function ($q) use ($v) {
+                    $q->where('payment_number', 'like', "%{$v}%")
+                        ->orWhere('description', 'like', "%{$v}%")
+                        ->orWhereHasMorph('reference', [Tour::class], fn ($tq) => $tq->where('tour_number', 'like', "%{$v}%")->orWhere('name', 'like', "%{$v}%"))
+                        ->orWhereHasMorph('reference', [TourPaymentRequest::class], fn ($rq) => $rq->whereHas('tour', fn ($tq) => $tq->where('tour_number', 'like', "%{$v}%")->orWhere('name', 'like', "%{$v}%")));
+                });
+            });
+
+        // Tổng tiền thật đã ghi nhận (phiếu đã duyệt); phiếu nháp chưa tính.
+        $totalIn = (float) (clone $base)->where('type', 'receipt')->where('status', 'approved')->sum('amount');
+        $totalOut = (float) (clone $base)->where('type', 'payment')->where('status', 'approved')->sum('amount');
+
+        $payments = $base
+            ->with(['account', 'company.bank'])
+            ->orderByDesc('payment_date')
+            ->orderByDesc('id')
+            ->paginate($request->filled('per_page') ? (int) $request->per_page : 30);
+
+        $tourIds = $payments->where('reference_type', Tour::class)->pluck('reference_id')->unique();
+        $tprIds = $payments->where('reference_type', TourPaymentRequest::class)->pluck('reference_id')->unique();
+        $tours = Tour::whereIn('id', $tourIds)->get(['id', 'tour_number', 'name'])->keyBy('id');
+        $tprs = TourPaymentRequest::with('tour:id,tour_number,name')->whereIn('id', $tprIds)->get()->keyBy('id');
+
+        return response()->json([
+            'data' => $payments->map(function ($p) use ($tours, $tprs, $categoryFor) {
+                $tour = null;
+                $category = 'Khác';
+                if ($p->reference_type === Tour::class) {
+                    $tour = $tours->get($p->reference_id);
+                    $category = 'Thu tiền khách';
+                } elseif ($p->reference_type === TourPaymentRequest::class) {
+                    $tpr = $tprs->get($p->reference_id);
+                    $tour = $tpr?->tour;
+                    $category = $categoryFor($tpr?->request_type);
+                }
+
+                $company = $p->company;
+
+                return [
+                    'id' => $p->id,
+                    'status' => $p->status,
+                    'payment_number' => $p->payment_number,
+                    'payment_date' => $p->payment_date?->toDateString(),
+                    'type' => $p->type,
+                    'category' => $category,
+                    'amount' => (float) $p->amount,
+                    'account_code' => $p->account?->code,
+                    'account_name' => $p->account?->name,
+                    'company_name' => $company?->name,
+                    'company' => $company ? [
+                        'id' => $company->id,
+                        'name' => $company->name,
+                        'bank_account_number' => $company->bank_account_number,
+                        'bank_account_name' => $company->bank_account_name,
+                        'bank' => $company->bank ? [
+                            'bin' => $company->bank->bin,
+                            'name' => $company->bank->name,
+                            'short_name' => $company->bank->short_name,
+                            'logo' => $company->bank->logo,
+                        ] : null,
+                    ] : null,
+                    'description' => $p->description,
+                    'tour_id' => $tour?->id,
+                    'tour_number' => $tour?->tour_number,
+                    'tour_name' => $tour?->name,
+                ];
+            }),
+            'summary' => [
+                'total_in' => $totalIn,
+                'total_out' => $totalOut,
+                'net' => $totalIn - $totalOut,
+            ],
+            'meta' => [
+                'current_page' => $payments->currentPage(),
+                'per_page' => $payments->perPage(),
+                'total' => $payments->total(),
+                'last_page' => $payments->lastPage(),
             ],
         ]);
     }
@@ -122,7 +233,13 @@ class TourPaymentController extends Controller
             abort_unless($guideAdvanceCheck->organization_id === $this->orgId(), 403);
         }
 
-        DB::transaction(function () use ($tourPayment, $useSupplierAdvance, $guideAdvanceId) {
+        DB::transaction(function () use (&$tourPayment, $useSupplierAdvance, $guideAdvanceId) {
+            // Khóa phiếu + kiểm tra lại trạng thái để tránh duyệt 2 lần (sinh phiếu chi & bút toán trùng)
+            $tourPayment = TourPaymentRequest::lockForUpdate()->findOrFail($tourPayment->id);
+            if ($tourPayment->status !== 'pending') {
+                throw ValidationException::withMessages(['status' => ['Phiếu đã được duyệt hoặc xử lý bởi người khác.']]);
+            }
+
             $tourPayment->update([
                 'status' => 'approved',
                 'approved_by' => Auth::id(),
@@ -250,6 +367,9 @@ class TourPaymentController extends Controller
                     ->where('guide_paid_amount', '>', 0)
                     ->each(fn ($s) => $s->increment('paid_amount', (float) $s->guide_paid_amount));
             }
+
+            // Bump version để form tour đang mở (báo giá/điều hành/quyết toán) không ghi đè paid_amount vừa thay đổi
+            Tour::where('id', $tourPayment->tour_id)->increment('version');
         });
 
         $amt = number_format((float) $tourPayment->amount, 0, ',', '.');
@@ -279,7 +399,13 @@ class TourPaymentController extends Controller
             'reject_reason' => ['nullable', 'string', 'max:500'],
         ]);
 
-        DB::transaction(function () use ($tourPayment, $validated) {
+        DB::transaction(function () use (&$tourPayment, $validated) {
+            // Khóa phiếu + kiểm tra lại trạng thái để tránh từ chối 2 lần
+            $tourPayment = TourPaymentRequest::lockForUpdate()->findOrFail($tourPayment->id);
+            if ($tourPayment->status !== 'pending') {
+                throw ValidationException::withMessages(['status' => ['Phiếu đã được xử lý bởi người khác.']]);
+            }
+
             if (in_array($tourPayment->request_type, ['settlement', 'settlement_receipt'])) {
                 TourService::where('tour_id', $tourPayment->tour_id)
                     ->where('service_stage', 'settlement')
@@ -295,6 +421,8 @@ class TourPaymentController extends Controller
                 'approved_at' => now(),
                 'reject_reason' => $validated['reject_reason'] ?? null,
             ]);
+
+            Tour::where('id', $tourPayment->tour_id)->increment('version');
         });
 
         $amt = number_format((float) $tourPayment->amount, 0, ',', '.');
@@ -306,6 +434,22 @@ class TourPaymentController extends Controller
 
     public function destroy(TourPaymentRequest $tourPayment): JsonResponse
     {
+        /** @var User $user */
+        $user = Auth::user();
+
+        // Lệnh đã duyệt không được phép xóa (phải dùng nghiệp vụ hoàn/điều chỉnh riêng).
+        abort_if($tourPayment->status === 'approved', 422, 'Lệnh thanh toán đã duyệt không được phép xóa.');
+
+        // Người duyệt được xóa lệnh chưa duyệt; người lập lệnh chỉ được tự hủy lệnh pending của mình.
+        $canApprove = $user->hasPermission('tours.payment_approve');
+        $isOwnPending = $tourPayment->status === 'pending'
+            && (int) $tourPayment->requested_by === (int) $user->id
+            && $user->hasPermission('tours.payment_request');
+
+        if (! $canApprove && ! $isOwnPending) {
+            return response()->json(['message' => 'Bạn không có quyền xóa lệnh thanh toán này.'], 403);
+        }
+
         $amt = number_format((float) $tourPayment->amount, 0, ',', '.');
         $svcName = $tourPayment->service?->name ?? $tourPayment->notes ?? '';
         $tourId = $tourPayment->tour_id;
@@ -351,6 +495,8 @@ class TourPaymentController extends Controller
                 $payment->delete();
             }
 
+            Tour::where('id', $tourPayment->tour_id)->increment('version');
+
             $tourPayment->delete();
         });
 
@@ -376,6 +522,7 @@ class TourPaymentController extends Controller
             'notes' => $r->notes,
             'status' => $r->status,
             'reject_reason' => $r->reject_reason,
+            'requested_by' => $r->requested_by,
             'requested_by_name' => $r->requestedBy?->name,
             'approved_by_name' => $r->approvedBy?->name,
             'approved_at' => $r->approved_at?->toDateTimeString(),

@@ -6,15 +6,13 @@ use App\Enums\PaymentType;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
-use App\Models\Company;
 use App\Models\JournalEntryLine;
 use App\Models\Payment;
-use App\Models\PurchaseOrder;
-use App\Models\SalesOrder;
-use App\Models\SalesOrderItem;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class ReportController extends Controller
@@ -105,23 +103,35 @@ class ReportController extends Controller
 
     public function receivables(): JsonResponse
     {
-        $orders = SalesOrder::with('company')
+        $orgId = $this->orgId();
+
+        // Tổng hợp bằng SQL (SUM/GROUP BY) — không nạp toàn bộ đơn & phiếu thu vào PHP.
+        // DB::table bỏ qua global scope nên phải tự lọc organization_id.
+        $sales = DB::table('sales_orders')
+            ->where('organization_id', $orgId)
             ->whereIn('status', ['confirmed', 'completed'])
-            ->get()
-            ->groupBy('company_id');
+            ->groupBy('company_id')
+            ->select('company_id', DB::raw('SUM(total_amount) as total'))
+            ->pluck('total', 'company_id');
 
-        $receipts = Payment::where('type', 'receipt')
-            ->get()
-            ->groupBy('company_id');
+        $receipts = DB::table('payments')
+            ->where('organization_id', $orgId)
+            ->where('type', 'receipt')
+            ->groupBy('company_id')
+            ->select('company_id', DB::raw('SUM(amount) as total'))
+            ->pluck('total', 'company_id');
 
-        $companies = Company::whereIn('id', $orders->keys())->get()->keyBy('id');
+        $names = DB::table('companies')
+            ->where('organization_id', $orgId)
+            ->whereIn('id', $sales->keys()->filter())
+            ->pluck('name', 'id');
 
-        $data = $orders->map(function ($companyOrders, $companyId) use ($receipts, $companies) {
-            $totalSales = $companyOrders->sum(fn ($o) => (float) $o->total_amount);
-            $totalReceipts = ($receipts[$companyId] ?? collect())->sum(fn ($p) => (float) $p->amount);
+        $data = $sales->map(function ($total, $companyId) use ($receipts, $names) {
+            $totalSales = (float) $total;
+            $totalReceipts = (float) ($receipts[$companyId] ?? 0);
 
             return [
-                'company_name' => $companies[$companyId]->name ?? '',
+                'company_name' => $names[$companyId] ?? '',
                 'total_sales' => $totalSales,
                 'total_receipts' => $totalReceipts,
                 'balance' => $totalSales - $totalReceipts,
@@ -133,23 +143,33 @@ class ReportController extends Controller
 
     public function payables(): JsonResponse
     {
-        $orders = PurchaseOrder::with('company')
+        $orgId = $this->orgId();
+
+        $purchases = DB::table('purchase_orders')
+            ->where('organization_id', $orgId)
             ->whereIn('status', ['confirmed', 'completed'])
-            ->get()
-            ->groupBy('company_id');
+            ->groupBy('company_id')
+            ->select('company_id', DB::raw('SUM(total_amount) as total'))
+            ->pluck('total', 'company_id');
 
-        $payments = Payment::where('type', 'payment')
-            ->get()
-            ->groupBy('company_id');
+        $payments = DB::table('payments')
+            ->where('organization_id', $orgId)
+            ->where('type', 'payment')
+            ->groupBy('company_id')
+            ->select('company_id', DB::raw('SUM(amount) as total'))
+            ->pluck('total', 'company_id');
 
-        $companies = Company::whereIn('id', $orders->keys())->get()->keyBy('id');
+        $names = DB::table('companies')
+            ->where('organization_id', $orgId)
+            ->whereIn('id', $purchases->keys()->filter())
+            ->pluck('name', 'id');
 
-        $data = $orders->map(function ($companyOrders, $companyId) use ($payments, $companies) {
-            $totalPurchases = $companyOrders->sum(fn ($o) => (float) $o->total_amount);
-            $totalPayments = ($payments[$companyId] ?? collect())->sum(fn ($p) => (float) $p->amount);
+        $data = $purchases->map(function ($total, $companyId) use ($payments, $names) {
+            $totalPurchases = (float) $total;
+            $totalPayments = (float) ($payments[$companyId] ?? 0);
 
             return [
-                'company_name' => $companies[$companyId]->name ?? '',
+                'company_name' => $names[$companyId] ?? '',
                 'total_purchases' => $totalPurchases,
                 'total_payments' => $totalPayments,
                 'balance' => $totalPurchases - $totalPayments,
@@ -187,39 +207,51 @@ class ReportController extends Controller
 
     private function salesGroupedByProduct(Request $request): JsonResponse
     {
-        $items = SalesOrderItem::with(['product.category.parent', 'salesOrder'])
-            ->whereHas('salesOrder', fn ($q) => $q->whereIn('status', ['confirmed', 'shipping', 'completed'])
-                ->when($request->from, fn ($q2, $v) => $q2->whereDate('order_date', '>=', $v))
-                ->when($request->to, fn ($q2, $v) => $q2->whereDate('order_date', '<=', $v))
-            )
-            ->when($request->category_id, fn ($q, $v) => $q->whereHas('product', fn ($pq) => $pq->where('category_id', $v)))
-            ->get();
-
+        $orgId = $this->orgId();
         $showProfit = $this->canViewProfit();
 
-        $grouped = $items->groupBy('product_id')->map(function ($rows) use ($showProfit) {
-            $first = $rows->first();
-            $product = $first->product;
-            $qty = $rows->sum(fn ($r) => (float) $r->quantity);
-            $revenue = $rows->sum(fn ($r) => (float) $r->amount * (1 + (float) $r->tax_rate / 100));
-            $cost = $rows->sum(fn ($r) => (float) $r->quantity * (float) $r->cost_price);
-            $standardTotal = $rows->sum(fn ($r) => (float) $r->standard_price > 0 ? (float) $r->quantity * (float) $r->standard_price : 0);
+        // Gom nhóm bằng SQL (SUM/GROUP BY) thay vì nạp toàn bộ dòng hàng vào PHP —
+        // an toàn với hàng triệu bản ghi.
+        $rows = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->leftJoin('products as p', 'p.id', '=', 'soi.product_id')
+            ->leftJoin('product_categories as cat', 'cat.id', '=', 'p.category_id')
+            ->leftJoin('product_categories as parent', 'parent.id', '=', 'cat.parent_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
+            ->when($request->category_id, fn ($q, $v) => $q->where('p.category_id', $v))
+            ->groupBy('soi.product_id', 'p.code', 'p.name', 'p.unit', 'cat.name', 'parent.name')
+            ->select([
+                DB::raw('COALESCE(p.code, \'\') as product_code'),
+                DB::raw('COALESCE(p.name, \'\') as product_name'),
+                DB::raw('COALESCE(p.unit, \'\') as unit'),
+                'cat.name as cat_name',
+                'parent.name as parent_name',
+                DB::raw('SUM(soi.quantity) as quantity'),
+                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
+                DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+                DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
+            ])
+            ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
+            ->get();
 
-            $cat = $product?->category;
-            $catLabel = $cat
-                ? ($cat->parent ? $cat->parent->name.' › '.$cat->name : $cat->name)
+        $grouped = $rows->map(function ($r) use ($showProfit) {
+            $catLabel = $r->cat_name
+                ? ($r->parent_name ? $r->parent_name.' › '.$r->cat_name : $r->cat_name)
                 : null;
 
-            $revenue = round($revenue, 2);
-            $cost = round($cost, 2);
-            $standardTotal = round($standardTotal, 2);
+            $revenue = round((float) $r->revenue, 2);
+            $cost = round((float) $r->cost, 2);
+            $standardTotal = round((float) $r->standard_total, 2);
 
             $row = [
-                'product_code' => $product?->code ?? '',
-                'product_name' => $product?->name ?? '',
-                'unit' => $product?->unit ?? '',
+                'product_code' => $r->product_code,
+                'product_name' => $r->product_name,
+                'unit' => $r->unit,
                 'category' => $catLabel,
-                'quantity' => round($qty, 3),
+                'quantity' => round((float) $r->quantity, 3),
                 'revenue' => $revenue,
                 'cost' => $cost,
                 'profit' => round($revenue - $cost, 2),
@@ -231,7 +263,6 @@ class ReportController extends Controller
             return $showProfit ? $row : $this->stripProfitFields($row);
         })
             ->filter(fn ($r) => $r['quantity'] != 0 || $r['revenue'] != 0)
-            ->sortByDesc('revenue')
             ->values();
 
         return response()->json([
@@ -255,8 +286,8 @@ class ReportController extends Controller
             })
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
-            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
-            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy(DB::raw('DATE(so.order_date)'))
             ->select([
                 DB::raw('DATE(so.order_date) as date'),
@@ -308,8 +339,8 @@ class ReportController extends Controller
             })
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
-            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
-            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy(DB::raw("DATE_FORMAT(so.order_date, '%Y-%m')"))
             ->select([
                 DB::raw("DATE_FORMAT(so.order_date, '%Y-%m') as month"),
@@ -363,8 +394,8 @@ class ReportController extends Controller
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->where('soi.is_return', false)
-            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
-            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy('pc.id', 'pc.name', 'parent_pc.name')
             ->select([
                 DB::raw("COALESCE(CASE WHEN parent_pc.name IS NOT NULL THEN CONCAT(parent_pc.name, ' › ', pc.name) ELSE pc.name END, '(Chưa phân loại)') as category_name"),
@@ -419,8 +450,8 @@ class ReportController extends Controller
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->where('soi.is_return', false)
-            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
-            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('so.company_id', $v))
             ->when($request->category_id, fn ($q, $v) => $q->where('p.category_id', $v))
             ->groupBy('p.id', 'p.code', 'p.name', 'p.unit', 'cat.name', 'parent_cat.name')
@@ -463,7 +494,7 @@ class ReportController extends Controller
             ->join('journal_entries as je', 'je.id', '=', 'jel.journal_entry_id')
             ->join('accounts as a', 'a.id', '=', 'jel.account_id')
             ->where('je.organization_id', $orgId)
-            ->whereDate('je.entry_date', '<=', $asOf)
+            ->where('je.entry_date', '<=', $asOf)
             ->whereIn('a.type', ['asset', 'liability', 'equity'])
             ->selectRaw('a.code, a.name, a.type, SUM(jel.debit_amount) as total_debit, SUM(jel.credit_amount) as total_credit')
             ->groupBy('a.id', 'a.code', 'a.name', 'a.type')
@@ -507,8 +538,8 @@ class ReportController extends Controller
             ->join('journal_entries as je', 'je.id', '=', 'jel.journal_entry_id')
             ->join('accounts as a', 'a.id', '=', 'jel.account_id')
             ->where('je.organization_id', $orgId)
-            ->when($from, fn ($q) => $q->whereDate('je.entry_date', '>=', $from))
-            ->whereDate('je.entry_date', '<=', $to)
+            ->when($from, fn ($q) => $q->where('je.entry_date', '>=', $from))
+            ->where('je.entry_date', '<=', $to)
             ->whereIn('a.type', ['revenue', 'expense'])
             ->selectRaw('a.code, a.name, a.type, SUM(jel.debit_amount) as total_debit, SUM(jel.credit_amount) as total_credit')
             ->groupBy('a.id', 'a.code', 'a.name', 'a.type')
@@ -613,21 +644,21 @@ class ReportController extends Controller
         if ($dateFrom) {
             $openingThu = Payment::whereIn('account_id', $accountIds)
                 ->where('type', PaymentType::Receipt)
-                ->whereDate('payment_date', '<', $dateFrom)
+                ->where('payment_date', '<', $dateFrom)
                 ->sum('amount');
             // Chuyển tiền đến TK này = thu
             $openingTransferIn = Payment::whereIn('to_account_id', $accountIds)
                 ->where('type', PaymentType::Transfer)
-                ->whereDate('payment_date', '<', $dateFrom)
+                ->where('payment_date', '<', $dateFrom)
                 ->sum('amount');
             $openingChi = Payment::whereIn('account_id', $accountIds)
                 ->where('type', PaymentType::Payment)
-                ->whereDate('payment_date', '<', $dateFrom)
+                ->where('payment_date', '<', $dateFrom)
                 ->sum('amount');
             // Chuyển tiền đi từ TK này = chi
             $openingTransferOut = Payment::whereIn('account_id', $accountIds)
                 ->where('type', PaymentType::Transfer)
-                ->whereDate('payment_date', '<', $dateFrom)
+                ->where('payment_date', '<', $dateFrom)
                 ->sum('amount');
             $openingBalance = (float) $openingThu + (float) $openingTransferIn
                 - (float) $openingChi - (float) $openingTransferOut;
@@ -636,8 +667,8 @@ class ReportController extends Controller
         // Phiếu thông thường và chuyển tiền đi (account_id match)
         $outEntries = Payment::with(['company', 'account', 'toAccount'])
             ->whereIn('account_id', $accountIds)
-            ->when($dateFrom, fn ($q, $v) => $q->whereDate('payment_date', '>=', $v))
-            ->when($dateTo, fn ($q, $v) => $q->whereDate('payment_date', '<=', $v))
+            ->when($dateFrom, fn ($q, $v) => $q->where('payment_date', '>=', $v))
+            ->when($dateTo, fn ($q, $v) => $q->where('payment_date', '<=', $v))
             ->get()
             ->each(fn ($p) => $p->_inflow = false);
 
@@ -645,8 +676,8 @@ class ReportController extends Controller
         $inEntries = Payment::with(['company', 'account', 'toAccount'])
             ->whereIn('to_account_id', $accountIds)
             ->where('type', PaymentType::Transfer)
-            ->when($dateFrom, fn ($q, $v) => $q->whereDate('payment_date', '>=', $v))
-            ->when($dateTo, fn ($q, $v) => $q->whereDate('payment_date', '<=', $v))
+            ->when($dateFrom, fn ($q, $v) => $q->where('payment_date', '>=', $v))
+            ->when($dateTo, fn ($q, $v) => $q->where('payment_date', '<=', $v))
             ->get()
             ->each(fn ($p) => $p->_inflow = true);
 
@@ -667,11 +698,8 @@ class ReportController extends Controller
             ->get()
             ->keyBy('payment_id');
 
-        $balance = $openingBalance;
-        $totalThu = 0.0;
-        $totalChi = 0.0;
-
-        $rows = $entries->map(function (Payment $p) use (&$balance, &$totalThu, &$totalChi, $counterpartMap) {
+        // Mỗi movement: ['date', 'sort_id', 'row' => [...]] — gộp payment + bút toán thủ công rồi tính số dư một lượt
+        $movements = $entries->map(function (Payment $p) use ($counterpartMap) {
             $amount = (float) $p->amount;
             $type = $p->type instanceof PaymentType ? $p->type : PaymentType::from($p->type->value ?? $p->type);
             $isInflow = $type === PaymentType::Receipt
@@ -679,11 +707,7 @@ class ReportController extends Controller
 
             $thu = $isInflow ? $amount : 0.0;
             $chi = $isInflow ? 0.0 : $amount;
-            $totalThu += $thu;
-            $totalChi += $chi;
-            $balance += $thu - $chi;
 
-            // Tài khoản đối ứng
             if ($type === PaymentType::Transfer) {
                 $counterAccount = $p->_inflow ? $p->account : $p->toAccount;
                 $cp = $counterAccount ? (object) ['code' => $counterAccount->code, 'name' => $counterAccount->name] : null;
@@ -694,20 +718,49 @@ class ReportController extends Controller
             $displayAccount = $p->_inflow ? $p->toAccount : $p->account;
 
             return [
-                'id' => $p->id,
-                'payment_number' => $p->payment_number,
-                'payment_date' => $p->payment_date->toDateString(),
-                'description' => $p->description,
-                'company' => $p->company?->name,
-                'account_code' => $displayAccount?->code,
-                'account_name' => $displayAccount?->name,
-                'counterpart_code' => $cp?->code,
-                'counterpart_name' => $cp?->name,
-                'thu' => $thu,
-                'chi' => $chi,
-                'balance' => round($balance, 2),
+                'date' => $p->payment_date->toDateString(),
+                'sort_id' => $p->id,
+                'row' => [
+                    'id' => 'P'.$p->id,
+                    'payment_number' => $p->payment_number,
+                    'payment_date' => $p->payment_date->toDateString(),
+                    'description' => $p->description,
+                    'company' => $p->company?->name,
+                    'account_code' => $displayAccount?->code,
+                    'account_name' => $displayAccount?->name,
+                    'counterpart_code' => $cp?->code,
+                    'counterpart_name' => $cp?->name,
+                    'thu' => $thu,
+                    'chi' => $chi,
+                ],
             ];
+        })->all();
+
+        // Bút toán thủ công (và các bút toán không qua phiếu thu/chi) có phát sinh trên TK tiền 111/112
+        $manualMovements = $this->cashbookManualMovements($accountIds, $orgId, $dateFrom, $dateTo);
+        $movements = array_merge($movements, $manualMovements);
+
+        // Cộng số dư đầu kỳ phần bút toán thủ công trước dateFrom
+        if ($dateFrom) {
+            $openingBalance += $this->cashbookManualOpening($accountIds, $orgId, $dateFrom);
+        }
+
+        // Sắp xếp theo ngày rồi id, tính số dư lũy kế
+        usort($movements, function ($a, $b) {
+            return [$a['date'], $a['sort_id']] <=> [$b['date'], $b['sort_id']];
         });
+
+        $balance = $openingBalance;
+        $totalThu = 0.0;
+        $totalChi = 0.0;
+
+        $rows = array_map(function ($m) use (&$balance, &$totalThu, &$totalChi) {
+            $totalThu += $m['row']['thu'];
+            $totalChi += $m['row']['chi'];
+            $balance += $m['row']['thu'] - $m['row']['chi'];
+
+            return [...$m['row'], 'balance' => round($balance, 2)];
+        }, $movements);
 
         return response()->json([
             'opening_balance' => round($openingBalance, 2),
@@ -716,6 +769,78 @@ class ReportController extends Controller
             'closing_balance' => round($balance, 2),
             'data' => $rows,
         ]);
+    }
+
+    /**
+     * Lấy phát sinh tiền (111/112) từ bút toán KHÔNG gắn với phiếu thu/chi (bút toán thủ công).
+     *
+     * @param  Collection<int, int>  $accountIds
+     * @return array<int, array{date: string, sort_id: int, row: array<string, mixed>}>
+     */
+    private function cashbookManualMovements($accountIds, int $orgId, ?string $dateFrom, ?string $dateTo): array
+    {
+        $lines = JournalEntryLine::with(['account', 'journalEntry'])
+            ->whereIn('account_id', $accountIds)
+            ->whereHas('journalEntry', function ($q) use ($orgId, $dateFrom, $dateTo) {
+                $q->where('organization_id', $orgId)
+                    ->whereNull('reference_type')
+                    ->when($dateFrom, fn ($q2, $v) => $q2->where('entry_date', '>=', $v))
+                    ->when($dateTo, fn ($q2, $v) => $q2->where('entry_date', '<=', $v));
+            })
+            ->get();
+
+        return $lines->map(function (JournalEntryLine $line) use ($accountIds) {
+            $entry = $line->journalEntry;
+            $thu = (float) $line->debit_amount;   // Nợ TK tiền = tiền vào
+            $chi = (float) $line->credit_amount;  // Có TK tiền = tiền ra
+
+            // Tài khoản đối ứng: dòng khác trong cùng bút toán, không thuộc TK tiền
+            $counter = JournalEntryLine::with('account')
+                ->where('journal_entry_id', $entry->id)
+                ->whereNotIn('account_id', $accountIds->all())
+                ->first();
+
+            return [
+                'date' => $entry->entry_date instanceof Carbon
+                    ? $entry->entry_date->toDateString()
+                    : (string) $entry->entry_date,
+                'sort_id' => $line->id,
+                'row' => [
+                    'id' => 'J'.$line->id,
+                    'payment_number' => $entry->entry_number,
+                    'payment_date' => $entry->entry_date instanceof Carbon
+                        ? $entry->entry_date->toDateString()
+                        : (string) $entry->entry_date,
+                    'description' => $line->description ?: $entry->description,
+                    'company' => null,
+                    'account_code' => $line->account?->code,
+                    'account_name' => $line->account?->name,
+                    'counterpart_code' => $counter?->account?->code,
+                    'counterpart_name' => $counter?->account?->name,
+                    'thu' => $thu,
+                    'chi' => $chi,
+                ],
+            ];
+        })->all();
+    }
+
+    /**
+     * Số dư đầu kỳ từ bút toán thủ công trên TK tiền trước ngày dateFrom.
+     *
+     * @param  Collection<int, int>  $accountIds
+     */
+    private function cashbookManualOpening($accountIds, int $orgId, string $dateFrom): float
+    {
+        $agg = JournalEntryLine::whereIn('account_id', $accountIds)
+            ->whereHas('journalEntry', function ($q) use ($orgId, $dateFrom) {
+                $q->where('organization_id', $orgId)
+                    ->whereNull('reference_type')
+                    ->where('entry_date', '<', $dateFrom);
+            })
+            ->selectRaw('COALESCE(SUM(debit_amount),0) as d, COALESCE(SUM(credit_amount),0) as c')
+            ->first();
+
+        return (float) $agg->d - (float) $agg->c;
     }
 
     public function salesByEmployee(Request $request): JsonResponse
@@ -730,8 +855,8 @@ class ReportController extends Controller
             })
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
-            ->when($request->from, fn ($q, $v) => $q->whereDate('so.order_date', '>=', $v))
-            ->when($request->to, fn ($q, $v) => $q->whereDate('so.order_date', '<=', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy('u.id', 'u.name', 'u.department', 'u.position')
             ->select([
                 'u.id as user_id',
@@ -784,8 +909,8 @@ class ReportController extends Controller
             ->join('journal_entries as je', 'je.id', '=', 'jel.journal_entry_id')
             ->join('accounts as a', 'a.id', '=', 'jel.account_id')
             ->where('je.organization_id', $orgId)
-            ->when($from, fn ($q) => $q->whereDate('je.entry_date', '>=', $from))
-            ->whereDate('je.entry_date', '<=', $to)
+            ->when($from, fn ($q) => $q->where('je.entry_date', '>=', $from))
+            ->where('je.entry_date', '<=', $to)
             ->whereIn('a.type', ['revenue', 'expense'])
             ->selectRaw('a.type, SUM(jel.debit_amount) as total_debit, SUM(jel.credit_amount) as total_credit')
             ->groupBy('a.type')

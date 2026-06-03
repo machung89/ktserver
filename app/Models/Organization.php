@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['name', 'tax_code', 'address', 'city', 'ward', 'phone', 'email', 'website', 'logo_url', 'print_template', 'settings', 'is_active', 'bank_id', 'bank_account_name', 'bank_account_number'])]
+#[Fillable(['name', 'tax_code', 'address', 'city', 'ward', 'phone', 'email', 'website', 'logo_url', 'print_template', 'settings', 'is_active', 'subscription_ends_at', 'bank_id', 'bank_account_name', 'bank_account_number'])]
 class Organization extends Model
 {
     protected function casts(): array
@@ -15,6 +15,7 @@ class Organization extends Model
         return [
             'is_active' => 'boolean',
             'settings' => 'array',
+            'subscription_ends_at' => 'date',
         ];
     }
 

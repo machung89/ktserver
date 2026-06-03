@@ -38,6 +38,7 @@ class JournalEntryTest extends TestCase
             ['code' => '511',   'name' => 'Doanh thu bán hàng',       'type' => AccountType::Revenue],
             ['code' => '5212',  'name' => 'Hàng bán bị trả lại',     'type' => AccountType::Revenue],
             ['code' => '632',   'name' => 'Giá vốn hàng bán',        'type' => AccountType::Expense],
+            ['code' => '111',   'name' => 'Tiền mặt',                'type' => AccountType::Asset],
         ];
 
         foreach ($accounts as $acc) {
@@ -380,5 +381,75 @@ class JournalEntryTest extends TestCase
         $entries = JournalEntry::orderBy('id')->get();
         $this->assertMatchesRegularExpression('/^BT-\d{6}$/', $entries->first()->entry_number);
         $this->assertNotEquals($entries->first()->entry_number, $entries->last()->entry_number);
+    }
+
+    // ── SỔ QUỸ ───────────────────────────────────────────────────────────────
+
+    #[TestDox('Bút toán thủ công có TK tiền (111) hiển thị trong sổ quỹ — tiền vào')]
+    public function test_manual_entry_with_cash_account_appears_in_cashbook_as_inflow(): void
+    {
+        // Nợ 111 / Có 511 — thu tiền mặt 500,000
+        $this->postJson('/api/v1/journal-entries', [
+            'entry_date' => now()->toDateString(),
+            'description' => 'Thu tiền khác bằng tiền mặt',
+            'lines' => [
+                ['account_code' => '111', 'description' => 'Tiền vào quỹ', 'debit' => 500000, 'credit' => 0],
+                ['account_code' => '511', 'description' => '', 'debit' => 0, 'credit' => 500000],
+            ],
+        ])->assertCreated();
+
+        $response = $this->getJson('/api/v1/reports/cashbook')->assertOk();
+
+        $row = collect($response->json('data'))
+            ->firstWhere('description', 'Tiền vào quỹ');
+
+        $this->assertNotNull($row, 'Bút toán thủ công phải xuất hiện trong sổ quỹ');
+        $this->assertEquals(500000, (float) $row['thu']);
+        $this->assertEquals(0, (float) $row['chi']);
+        $this->assertEquals('511', $row['counterpart_code']);
+        $this->assertEquals(500000, (float) $response->json('total_thu'));
+    }
+
+    #[TestDox('Bút toán thủ công chi tiền mặt hiển thị trong sổ quỹ — tiền ra')]
+    public function test_manual_entry_cash_outflow_appears_in_cashbook(): void
+    {
+        // Nợ 632 / Có 111 — chi tiền mặt 300,000
+        $this->postJson('/api/v1/journal-entries', [
+            'entry_date' => now()->toDateString(),
+            'description' => 'Chi phí khác bằng tiền mặt',
+            'lines' => [
+                ['account_code' => '632', 'description' => '', 'debit' => 300000, 'credit' => 0],
+                ['account_code' => '111', 'description' => 'Tiền ra quỹ', 'debit' => 0, 'credit' => 300000],
+            ],
+        ])->assertCreated();
+
+        $response = $this->getJson('/api/v1/reports/cashbook')->assertOk();
+
+        $row = collect($response->json('data'))
+            ->firstWhere('description', 'Tiền ra quỹ');
+
+        $this->assertNotNull($row);
+        $this->assertEquals(300000, (float) $row['chi']);
+        $this->assertEquals(0, (float) $row['thu']);
+        $this->assertEquals(300000, (float) $response->json('total_chi'));
+    }
+
+    #[TestDox('Bút toán thủ công không liên quan TK tiền không vào sổ quỹ')]
+    public function test_manual_entry_without_cash_account_not_in_cashbook(): void
+    {
+        // Nợ 131 / Có 511 — không có TK tiền
+        $this->postJson('/api/v1/journal-entries', [
+            'entry_date' => now()->toDateString(),
+            'description' => 'Bút toán không tiền',
+            'lines' => [
+                ['account_code' => '131', 'description' => '', 'debit' => 400000, 'credit' => 0],
+                ['account_code' => '511', 'description' => '', 'debit' => 0, 'credit' => 400000],
+            ],
+        ])->assertCreated();
+
+        $response = $this->getJson('/api/v1/reports/cashbook')->assertOk();
+
+        $found = collect($response->json('data'))->firstWhere('description', 'Bút toán không tiền');
+        $this->assertNull($found, 'Bút toán không có TK 111/112 không được vào sổ quỹ');
     }
 }

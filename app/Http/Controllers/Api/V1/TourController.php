@@ -38,11 +38,16 @@ class TourController extends Controller
         $canViewAll = $user->hasPermission('tours.view_all');
         $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
 
-        $tours = Tour::with(['customer', 'createdBy'])
+        $base = Tour::query()
             ->withSum(['services as services_cost_total' => fn ($q) => $q->where('service_stage', 'operating')], 'cost')
             ->withSum(['services as services_paid_total' => fn ($q) => $q->whereIn('service_stage', ['operating', 'settlement'])], 'paid_amount')
-            ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
+            ->when($createdByFilter, fn ($q) => $q->where(function ($sub) use ($createdByFilter) {
+                // Xem tour của mình (hoặc người được phép xem) HOẶC tour mình điều hành
+                $sub->whereIn('created_by', $createdByFilter)
+                    ->orWhere('operated_by', Auth::id());
+            }))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
+            ->when($request->stage, fn ($q, $v) => $q->where('stage', $v))
             ->when($request->search, function ($q, $v) {
                 $q->where(function ($q) use ($v) {
                     $q->where('tour_number', 'like', "%{$v}%")
@@ -50,13 +55,26 @@ class TourController extends Controller
                         ->orWhereHas('customer', fn ($cq) => $cq->where('name', 'like', "%{$v}%"));
                 });
             })
-            ->when($request->date_from, fn ($q, $v) => $q->whereDate('start_date', '>=', $v))
-            ->when($request->date_to, fn ($q, $v) => $q->whereDate('start_date', '<=', $v))
+            ->when($request->date_from, fn ($q, $v) => $q->where('start_date', '>=', $v))
+            ->when($request->date_to, fn ($q, $v) => $q->where('start_date', '<=', $v));
+
+        // Tổng phải thu / phải trả trên toàn bộ kết quả lọc (không chỉ trang hiện tại); bỏ qua tour đã hủy
+        $summaryRows = (clone $base)->where('status', '!=', 'cancelled')->get();
+        $totalReceivable = $summaryRows->sum(fn ($t) => max(0, (float) $t->total_amount - (float) $t->paid_amount));
+        $totalPayable = $summaryRows->sum(fn ($t) => max(0, (float) ($t->services_cost_total ?? 0) - (float) ($t->services_paid_total ?? 0)));
+
+        $tours = $base
+            ->with(['customer', 'createdBy', 'operatedBy'])
+            ->orderByDesc('is_featured') // Tour nổi bật lên đầu
             ->latest()
             ->paginate($request->filled('per_page') ? (int) $request->per_page : 20);
 
         return response()->json([
             'data' => $tours->map(fn ($t) => $this->formatList($t)),
+            'summary' => [
+                'total_receivable' => $totalReceivable,
+                'total_payable' => $totalPayable,
+            ],
             'meta' => [
                 'current_page' => $tours->currentPage(),
                 'per_page' => $tours->perPage(),
@@ -81,6 +99,7 @@ class TourController extends Controller
             'notes' => ['nullable', 'string'],
             'services' => ['nullable', 'array'],
             'services.*.service_type' => ['required', 'string'],
+            'services.*.service_stage' => ['nullable', 'string'],
             'services.*.name' => ['required', 'string', 'max:255'],
             'services.*.supplier_id' => ['nullable', 'exists:companies,id'],
             'services.*.unit_price' => ['nullable', 'numeric', 'min:0'],
@@ -130,7 +149,7 @@ class TourController extends Controller
             return $tour;
         });
 
-        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'created', "Tạo tour #{$tour->tour_number}: {$tour->name}", $tour->id);
@@ -144,15 +163,26 @@ class TourController extends Controller
         $user = Auth::user();
         if (! $user->hasPermission('tours.view_all')) {
             $viewableIds = array_merge([Auth::id()], $user->getViewableUserIds());
-            abort_unless(in_array($tour->created_by, $viewableIds), 403, 'Bạn không có quyền xem tour này.');
+            $canView = in_array($tour->created_by, $viewableIds) || $tour->operated_by === Auth::id();
+            abort_unless($canView, 403, 'Bạn không có quyền xem tour này.');
         }
 
-        $tour->load(['customer', 'createdBy', 'services.supplier', 'extraRevenues',
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier', 'extraRevenues',
             'services' => fn ($q) => $q->withSum(['paymentRequests as pending_amount' => fn ($q) => $q->where('status', 'pending')], 'amount'),
         ]);
         $this->loadPaymentHistory($tour);
 
         return response()->json(['data' => $this->format($tour)]);
+    }
+
+    /**
+     * Optimistic lock: chặn ghi đè nếu tour đã bị người khác sửa kể từ lúc client tải dữ liệu.
+     */
+    private function assertVersionMatch(Tour $tour, array $validated): void
+    {
+        if (isset($validated['version']) && (int) $tour->version !== (int) $validated['version']) {
+            abort(409, 'Tour đã được người khác cập nhật. Vui lòng tải lại để xem thay đổi mới nhất.');
+        }
     }
 
     public function update(Request $request, Tour $tour): JsonResponse
@@ -168,9 +198,11 @@ class TourController extends Controller
             'child_price' => ['nullable', 'numeric', 'min:0'],
             'vat_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'notes' => ['nullable', 'string'],
+            'version' => ['nullable', 'integer'],
             'services' => ['nullable', 'array'],
             'services.*.id' => ['nullable', 'exists:tour_services,id'],
             'services.*.service_type' => ['required', 'string'],
+            'services.*.service_stage' => ['nullable', 'string'],
             'services.*.name' => ['required', 'string', 'max:255'],
             'services.*.supplier_id' => ['nullable', 'exists:companies,id'],
             'services.*.unit_price' => ['nullable', 'numeric', 'min:0'],
@@ -184,12 +216,19 @@ class TourController extends Controller
         ]);
 
         abort_unless(
-            in_array($tour->status, ['draft', 'confirmed', 'completed']),
+            $tour->status === 'draft',
             422,
-            'Không thể sửa tour đã hủy.'
+            'Chỉ có thể sửa báo giá khi tour ở trạng thái nháp (chưa xác nhận).'
         );
 
-        DB::transaction(function () use ($tour, $validated) {
+        DB::transaction(function () use (&$tour, $validated) {
+            // Khóa bản ghi tour để tránh 2 người sửa đè lên nhau
+            $tour = Tour::lockForUpdate()->findOrFail($tour->id);
+            if ($tour->status !== 'draft') {
+                throw ValidationException::withMessages(['status' => ['Chỉ có thể sửa báo giá khi tour ở trạng thái nháp (chưa xác nhận).']]);
+            }
+            $this->assertVersionMatch($tour, $validated);
+
             $numAdults = (int) $validated['num_adults'];
             $numChildren = (int) ($validated['num_children'] ?? 0);
             $adultPrice = (float) $validated['unit_price'];
@@ -213,6 +252,7 @@ class TourController extends Controller
                 'tax_amount' => $taxAmount,
                 'total_amount' => $subtotal + $taxAmount + (float) $tour->extra_revenues_total,
                 'notes' => $validated['notes'] ?? null,
+                'version' => $tour->version + 1,
             ]);
 
             $incomingIds = collect($validated['services'] ?? [])->pluck('id')->filter()->all();
@@ -250,7 +290,7 @@ class TourController extends Controller
             }
         });
 
-        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'updated', "Cập nhật báo giá tour #{$tour->tour_number}", $tour->id);
@@ -260,12 +300,14 @@ class TourController extends Controller
 
     public function operate(Request $request, Tour $tour): JsonResponse
     {
+        abort_if($tour->status === 'completed', 422, 'Tour đã hoàn thành, chỉ được thực hiện thanh toán.');
         abort_unless(in_array($tour->stage, ['quote', 'operating']), 422, 'Tour không ở giai đoạn có thể điều hành.');
 
         $validated = $request->validate([
             'services' => ['nullable', 'array'],
             'services.*.id' => ['nullable', 'exists:tour_services,id'],
             'services.*.service_type' => ['required', 'string'],
+            'services.*.service_stage' => ['nullable', 'string'],
             'services.*.name' => ['required', 'string', 'max:255'],
             'services.*.supplier_id' => ['nullable', 'exists:companies,id'],
             'services.*.unit_price' => ['nullable', 'numeric', 'min:0'],
@@ -273,6 +315,7 @@ class TourController extends Controller
             'services.*.days' => ['nullable', 'integer', 'min:1'],
             'services.*.advance_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.notes' => ['nullable', 'string'],
+            'version' => ['nullable', 'integer'],
             'extra_revenues' => ['nullable', 'array'],
             'extra_revenues.*.id' => ['nullable', 'exists:tour_extra_revenues,id'],
             'extra_revenues.*.name' => ['required', 'string', 'max:255'],
@@ -281,7 +324,14 @@ class TourController extends Controller
             'extra_revenues.*.notes' => ['nullable', 'string'],
         ]);
 
-        DB::transaction(function () use ($tour, $validated) {
+        DB::transaction(function () use (&$tour, $validated) {
+            // Khóa tour để tránh điều hành chồng chéo
+            $tour = Tour::lockForUpdate()->findOrFail($tour->id);
+            if (! in_array($tour->stage, ['quote', 'operating'])) {
+                throw ValidationException::withMessages(['stage' => ['Tour không ở giai đoạn có thể điều hành.']]);
+            }
+            $this->assertVersionMatch($tour, $validated);
+
             $incomingIds = collect($validated['services'] ?? [])->pluck('id')->filter()->all();
 
             $hasApprovedAdvance = $tour->paymentRequests()
@@ -324,7 +374,12 @@ class TourController extends Controller
 
             $this->syncExtraRevenues($tour, $validated['extra_revenues'] ?? []);
 
-            $tour->update(['stage' => 'operating']);
+            // Người lưu điều hành lần đầu được gắn là nhân viên điều hành tour
+            $operatorUpdate = ['stage' => 'operating', 'version' => $tour->version + 1];
+            if (! $tour->operated_by) {
+                $operatorUpdate['operated_by'] = Auth::id();
+            }
+            $tour->update($operatorUpdate);
 
             if (! $hasApprovedAdvance) {
                 $totalAdvance = $tour->services()->where('service_stage', 'operating')->sum('advance_amount');
@@ -348,7 +403,7 @@ class TourController extends Controller
             }
         });
 
-        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
+        $fresh = $tour->fresh(['customer', 'createdBy', 'operatedBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'operated', "Lưu điều hành tour #{$tour->tour_number}", $tour->id);
@@ -358,12 +413,14 @@ class TourController extends Controller
 
     public function settle(Request $request, Tour $tour): JsonResponse
     {
+        abort_if($tour->status === 'completed', 422, 'Tour đã hoàn thành, chỉ được thực hiện thanh toán.');
         abort_unless(in_array($tour->stage, ['operating', 'settling']), 422, 'Tour chưa qua giai đoạn điều hành.');
 
         $validated = $request->validate([
             'services' => ['nullable', 'array'],
             'services.*.id' => ['nullable', 'exists:tour_services,id'],
             'services.*.service_type' => ['required', 'string'],
+            'services.*.service_stage' => ['nullable', 'string'],
             'services.*.name' => ['required', 'string', 'max:255'],
             'services.*.supplier_id' => ['nullable', 'exists:companies,id'],
             'services.*.unit_price' => ['nullable', 'numeric', 'min:0'],
@@ -372,6 +429,7 @@ class TourController extends Controller
             'services.*.guide_paid_amount' => ['nullable', 'numeric', 'min:0'],
             'services.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'services.*.notes' => ['nullable', 'string'],
+            'version' => ['nullable', 'integer'],
             'extra_revenues' => ['nullable', 'array'],
             'extra_revenues.*.id' => ['nullable', 'exists:tour_extra_revenues,id'],
             'extra_revenues.*.name' => ['required', 'string', 'max:255'],
@@ -380,7 +438,14 @@ class TourController extends Controller
             'extra_revenues.*.notes' => ['nullable', 'string'],
         ]);
 
-        DB::transaction(function () use ($tour, $validated) {
+        DB::transaction(function () use (&$tour, $validated) {
+            // Khóa tour để tránh quyết toán chồng chéo
+            $tour = Tour::lockForUpdate()->findOrFail($tour->id);
+            if (! in_array($tour->stage, ['operating', 'settling'])) {
+                throw ValidationException::withMessages(['stage' => ['Tour chưa qua giai đoạn điều hành.']]);
+            }
+            $this->assertVersionMatch($tour, $validated);
+
             $incomingIds = collect($validated['services'] ?? [])->pluck('id')->filter()->all();
 
             $tour->services()
@@ -412,7 +477,7 @@ class TourController extends Controller
 
             $this->syncExtraRevenues($tour, $validated['extra_revenues'] ?? []);
 
-            $tour->update(['stage' => 'settling']);
+            $tour->update(['stage' => 'settling', 'version' => $tour->version + 1]);
 
             $totalAdvance = $tour->services()->where('service_stage', 'operating')->sum('advance_amount');
             $totalGuidePaid = $tour->services()->sum('guide_paid_amount');
@@ -441,7 +506,7 @@ class TourController extends Controller
             }
         });
 
-        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
+        $fresh = $tour->fresh(['customer', 'createdBy', 'operatedBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'settled', "Lưu quyết toán tour #{$tour->tour_number}", $tour->id);
@@ -455,7 +520,7 @@ class TourController extends Controller
 
         $tour = $this->tourService->confirm($tour);
 
-        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'confirmed', "Xác nhận tour #{$tour->tour_number}", $tour->id);
@@ -468,10 +533,43 @@ class TourController extends Controller
         abort_unless($tour->status === 'confirmed', 422, 'Chỉ có thể hoàn thành tour đã xác nhận.');
         $tour->update(['status' => 'completed']);
 
-        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'completed', "Hoàn thành tour #{$tour->tour_number}", $tour->id);
+
+        return response()->json(['data' => $this->format($tour)]);
+    }
+
+    /**
+     * Đổi trạng thái tour thủ công (quyền tours.change_status).
+     * Chỉ cập nhật cột status — không chạy lại bút toán/đặt chỗ; dùng để điều chỉnh đặc biệt.
+     */
+    public function changeStatus(Request $request, Tour $tour): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => ['required', 'in:draft,confirmed,completed,cancelled'],
+        ]);
+
+        $old = $tour->status;
+        $new = $validated['status'];
+
+        if ($old === $new) {
+            return response()->json(['data' => $this->format($tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']))]);
+        }
+
+        DB::transaction(function () use (&$tour, $new) {
+            $tour = Tour::lockForUpdate()->findOrFail($tour->id);
+            $tour->update(['status' => $new, 'version' => $tour->version + 1]);
+        });
+
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']);
+        $this->loadPaymentHistory($tour);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(), 'status_changed',
+            "Đổi trạng thái tour #{$tour->tour_number}: {$old} → {$new}", $tour->id
+        );
 
         return response()->json(['data' => $this->format($tour)]);
     }
@@ -481,7 +579,7 @@ class TourController extends Controller
         abort_unless(in_array($tour->status, ['draft', 'confirmed']), 422, 'Không thể hủy tour ở trạng thái này.');
         $tour = $this->tourService->cancel($tour);
 
-        $tour->load(['customer', 'createdBy', 'services.supplier']);
+        $tour->load(['customer', 'createdBy', 'operatedBy', 'services.supplier']);
         $this->loadPaymentHistory($tour);
 
         $this->activityLog->log($this->orgId(), Auth::id(), 'cancelled', "Hủy tour #{$tour->tour_number}", $tour->id);
@@ -532,9 +630,10 @@ class TourController extends Controller
             ]);
 
             $tourLocked->increment('paid_amount', (float) $validated['amount']);
+            $tourLocked->increment('version');
         });
 
-        $fresh = $tour->fresh(['customer', 'createdBy', 'services.supplier', 'extraRevenues']);
+        $fresh = $tour->fresh(['customer', 'createdBy', 'operatedBy', 'services.supplier', 'extraRevenues']);
         $this->loadPaymentHistory($fresh);
 
         $amount = number_format((float) $validated['amount'], 0, ',', '.');
@@ -545,6 +644,8 @@ class TourController extends Controller
 
     public function storeExtraRevenue(Request $request, Tour $tour): JsonResponse
     {
+        abort_if($tour->status === 'completed', 422, 'Tour đã hoàn thành, không thể thêm khoản thu phát sinh.');
+
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'quantity' => ['nullable', 'integer', 'min:1'],
@@ -574,6 +675,7 @@ class TourController extends Controller
     public function updateExtraRevenue(Request $request, TourExtraRevenue $extraRevenue): JsonResponse
     {
         abort_unless($extraRevenue->tour->organization_id === $this->orgId(), 403);
+        abort_if($extraRevenue->tour->status === 'completed', 422, 'Tour đã hoàn thành, không thể sửa khoản thu phát sinh.');
 
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
@@ -604,6 +706,7 @@ class TourController extends Controller
     public function destroyExtraRevenue(TourExtraRevenue $extraRevenue): JsonResponse
     {
         abort_unless($extraRevenue->tour->organization_id === $this->orgId(), 403);
+        abort_if($extraRevenue->tour->status === 'completed', 422, 'Tour đã hoàn thành, không thể xóa khoản thu phát sinh.');
 
         $tour = $extraRevenue->tour;
         $extraRevenue->delete();
@@ -666,8 +769,12 @@ class TourController extends Controller
             'extra_revenues_total' => (float) $tour->extra_revenues_total,
             'status' => $tour->status,
             'stage' => $tour->stage ?? 'quote',
+            'version' => (int) $tour->version,
             'is_featured' => (bool) $tour->is_featured,
+            'created_by' => $tour->created_by,
             'created_by_name' => $tour->createdBy?->name,
+            'operated_by' => $tour->operated_by,
+            'operated_by_name' => $tour->operatedBy?->name,
         ];
     }
 
@@ -849,7 +956,8 @@ class TourController extends Controller
             'days' => $days,
             'tax_rate' => $taxRate,
             'cost' => round($baseCost * (1 + $taxRate / 100), 2),
-            'paid_amount' => (float) ($svc['paid_amount'] ?? 0),
+            // paid_amount KHÔNG nằm ở đây: chỉ thay đổi qua lệnh thanh toán/thu tiền (approve/collect),
+            // không cho phép sửa tour / điều hành / quyết toán ghi đè.
             'advance_amount' => (float) ($svc['advance_amount'] ?? 0),
             'guide_paid_amount' => (float) ($svc['guide_paid_amount'] ?? 0),
             'notes' => $svc['notes'] ?? null,

@@ -55,8 +55,8 @@ class SalesOrderController extends Controller
                         ->orWhereHas('company', fn ($cq) => $cq->where('name', 'like', "%{$v}%"));
                 });
             })
-            ->when($request->date_from, fn ($q, $v) => $q->whereDate('order_date', '>=', $v))
-            ->when($request->date_to, fn ($q, $v) => $q->whereDate('order_date', '<=', $v))
+            ->when($request->date_from, fn ($q, $v) => $q->where('order_date', '>=', $v))
+            ->when($request->date_to, fn ($q, $v) => $q->where('order_date', '<=', $v))
             ->when($request->filled('payment_status'), function ($q) use ($request) {
                 $statuses = array_filter(explode(',', $request->payment_status));
                 if ($statuses) {

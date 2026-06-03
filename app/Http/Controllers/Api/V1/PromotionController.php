@@ -207,8 +207,8 @@ class PromotionController extends Controller
             $orders = SalesOrder::with('items')
                 ->where('organization_id', $this->orgId())
                 ->whereNotIn('status', ['cancelled'])
-                ->when($promotion->start_date, fn ($q) => $q->whereDate('order_date', '>=', $promotion->start_date))
-                ->when($promotion->end_date, fn ($q) => $q->whereDate('order_date', '<=', $promotion->end_date))
+                ->when($promotion->start_date, fn ($q) => $q->where('order_date', '>=', $promotion->start_date))
+                ->when($promotion->end_date, fn ($q) => $q->where('order_date', '<=', $promotion->end_date))
                 ->get();
 
             foreach ($orders as $order) {

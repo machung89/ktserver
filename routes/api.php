@@ -25,6 +25,7 @@ use App\Http\Controllers\Api\V1\RestaurantTableController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\SalesOrderController;
 use App\Http\Controllers\Api\V1\ShopeeImportController;
+use App\Http\Controllers\Api\V1\SystemController;
 use App\Http\Controllers\Api\V1\TiktokImportController;
 use App\Http\Controllers\Api\V1\TourController;
 use App\Http\Controllers\Api\V1\TourGuideAdvanceController;
@@ -49,6 +50,14 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::put('/profile', [ProfileController::class, 'update']);
     Route::put('/profile/password', [ProfileController::class, 'changePassword']);
 
+    // Quản trị hệ thống (super admin) — không cần ngữ cảnh tổ chức
+    Route::prefix('v1/system')->middleware('super_admin')->group(function (): void {
+        Route::get('organizations', [SystemController::class, 'organizations']);
+        Route::post('organizations/{organization}/extend', [SystemController::class, 'extendSubscription']);
+        Route::post('organizations/{organization}/toggle-active', [SystemController::class, 'toggleActive']);
+        Route::post('organizations/{organization}/switch', [SystemController::class, 'switchOrganization']);
+    });
+
     Route::prefix('v1')->middleware('org')->group(function (): void {
 
         // Thông tin user + permissions
@@ -64,12 +73,17 @@ Route::middleware('auth:sanctum')->group(function (): void {
                     ->unique()
                     ->values();
 
+            $subEndsAt = $org?->subscription_ends_at;
+
             return response()->json([
                 'id' => $user->id,
                 'name' => $user->name,
                 'email' => $user->email,
                 'is_admin' => $isAdmin,
+                'is_super_admin' => (bool) $user->is_super_admin,
                 'permissions' => $permissions,
+                'subscription_ends_at' => $subEndsAt?->toDateString(),
+                'subscription_days_left' => $subEndsAt ? (int) now()->startOfDay()->diffInDays($subEndsAt, false) : null,
                 'org_settings' => [
                     'enable_sales_tax' => (bool) $org?->setting('enable_sales_tax', false),
                     'enable_purchase_tax' => (bool) $org?->setting('enable_purchase_tax', false),
@@ -154,7 +168,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('purchases', [PurchaseOrderController::class, 'index']);
             Route::get('purchases/{purchaseOrder}', [PurchaseOrderController::class, 'show']);
         });
-        Route::post('purchases', [PurchaseOrderController::class, 'store'])->middleware('permission:purchases.create');
+        Route::post('purchases', [PurchaseOrderController::class, 'store'])->middleware('permission:purchases.create', 'subscription');
         Route::put('purchases/{purchaseOrder}', [PurchaseOrderController::class, 'update'])->middleware('permission:purchases.edit');
         Route::post('purchases/bulk-confirm', [PurchaseOrderController::class, 'bulkConfirm'])->middleware('permission:purchases.confirm');
         Route::post('purchases/{purchaseOrder}/confirm', [PurchaseOrderController::class, 'confirm'])->middleware('permission:purchases.confirm');
@@ -181,7 +195,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('sales/counts', [SalesOrderController::class, 'counts']);
             Route::get('sales/{salesOrder}', [SalesOrderController::class, 'show']);
         });
-        Route::post('sales', [SalesOrderController::class, 'store'])->middleware('permission:sales.create');
+        Route::post('sales', [SalesOrderController::class, 'store'])->middleware('permission:sales.create', 'subscription');
         Route::post('sales/import', [SalesOrderController::class, 'bulkImport'])->middleware('permission:sales.create');
         Route::post('sales/shopee-import', [ShopeeImportController::class, 'import'])->middleware('permission:sales.create');
         Route::post('sales/tiktok-import', [TiktokImportController::class, 'import'])->middleware('permission:sales.create');
@@ -287,12 +301,13 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('tours', [TourController::class, 'index']);
             Route::get('tours/{tour}', [TourController::class, 'show']);
         });
-        Route::post('tours', [TourController::class, 'store'])->middleware('permission:tours.quote');
+        Route::post('tours', [TourController::class, 'store'])->middleware('permission:tours.quote', 'subscription');
         Route::put('tours/{tour}', [TourController::class, 'update'])->middleware('permission:tours.quote');
         Route::delete('tours/{tour}', [TourController::class, 'destroy'])->middleware('permission:tours.quote');
         Route::post('tours/{tour}/confirm', [TourController::class, 'confirm'])->middleware('permission:tours.confirm');
         Route::post('tours/{tour}/complete', [TourController::class, 'complete'])->middleware('permission:tours.confirm');
         Route::post('tours/{tour}/cancel', [TourController::class, 'cancel'])->middleware('permission:tours.cancel');
+        Route::post('tours/{tour}/change-status', [TourController::class, 'changeStatus'])->middleware('permission:tours.change_status');
         Route::post('tours/{tour}/collect', [TourController::class, 'collect'])->middleware('permission:tours.confirm');
         Route::post('tours/{tour}/operate', [TourController::class, 'operate'])->middleware('permission:tours.operate');
         Route::post('tours/{tour}/settle', [TourController::class, 'settle'])->middleware('permission:tours.settle');
@@ -314,11 +329,13 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::middleware('permission:tours.view')->group(function () {
             Route::get('tour-payments', [TourPaymentController::class, 'index']);
             Route::get('tour-payments/supplier-advance-balance', [TourPaymentController::class, 'supplierAdvanceBalance']);
+            Route::get('tour-cashflow', [TourPaymentController::class, 'cashflow']);
         });
         Route::post('tour-payments', [TourPaymentController::class, 'store'])->middleware('permission:tours.payment_request');
         Route::post('tour-payments/{tourPayment}/approve', [TourPaymentController::class, 'approve'])->middleware('permission:tours.payment_approve');
         Route::post('tour-payments/{tourPayment}/reject', [TourPaymentController::class, 'reject'])->middleware('permission:tours.payment_approve');
-        Route::delete('tour-payments/{tourPayment}', [TourPaymentController::class, 'destroy'])->middleware('permission:tours.payment_approve');
+        // Phân quyền xử lý trong controller: người duyệt xóa mọi lệnh; người lập tự hủy lệnh pending của mình.
+        Route::delete('tour-payments/{tourPayment}', [TourPaymentController::class, 'destroy']);
 
         // Nhật ký hoạt động
         Route::get('activity-logs', [ActivityLogController::class, 'index'])->middleware('permission:tours.view');

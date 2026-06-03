@@ -22,8 +22,8 @@ class JournalEntryController extends Controller
     public function index(Request $request): AnonymousResourceCollection
     {
         $entries = JournalEntry::with('lines.account')
-            ->when($request->from, fn ($q, $v) => $q->whereDate('entry_date', '>=', $v))
-            ->when($request->to, fn ($q, $v) => $q->whereDate('entry_date', '<=', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('entry_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('entry_date', '<=', $v))
             ->latest('entry_date')
             ->paginate(30);
 
@@ -82,7 +82,7 @@ class JournalEntryController extends Controller
         $openingBalance = 0.0;
         if ($request->from) {
             $before = (clone $linesQuery)
-                ->whereHas('journalEntry', fn ($q) => $q->whereDate('entry_date', '<', $request->from))
+                ->whereHas('journalEntry', fn ($q) => $q->where('entry_date', '<', $request->from))
                 ->get();
             $debitBefore = $before->sum(fn ($l) => (float) $l->debit_amount);
             $creditBefore = $before->sum(fn ($l) => (float) $l->credit_amount);
@@ -90,8 +90,8 @@ class JournalEntryController extends Controller
         }
 
         $inPeriod = (clone $linesQuery)
-            ->when($request->from, fn ($q, $v) => $q->whereHas('journalEntry', fn ($jq) => $jq->whereDate('entry_date', '>=', $v)))
-            ->when($request->to, fn ($q, $v) => $q->whereHas('journalEntry', fn ($jq) => $jq->whereDate('entry_date', '<=', $v)))
+            ->when($request->from, fn ($q, $v) => $q->whereHas('journalEntry', fn ($jq) => $jq->where('entry_date', '>=', $v)))
+            ->when($request->to, fn ($q, $v) => $q->whereHas('journalEntry', fn ($jq) => $jq->where('entry_date', '<=', $v)))
             ->get()
             ->sortBy(fn ($l) => $l->journalEntry->entry_date);
 

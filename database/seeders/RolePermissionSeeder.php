@@ -94,10 +94,10 @@ class RolePermissionSeeder extends Seeder
             'tours' => [
                 ['tours.view', 'Xem tour du lịch (của mình)'],
                 ['tours.view_all', 'Xem tour của tất cả nhân viên'],
-                ['tours.create', 'Tạo / sửa tour'],
-                ['tours.quote', 'Lên báo giá tour'],
+                ['tours.quote', 'Tạo / sửa báo giá tour'],
                 ['tours.confirm', 'Xác nhận / hoàn thành tour'],
                 ['tours.cancel', 'Hủy tour'],
+                ['tours.change_status', 'Đổi trạng thái tour thủ công'],
                 ['tours.operate', 'Điều hành tour'],
                 ['tours.settle', 'Quyết toán tour'],
                 ['tours.payment_request', 'Lên lệnh thanh toán dịch vụ tour'],

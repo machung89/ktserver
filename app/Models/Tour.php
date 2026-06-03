@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['organization_id', 'tour_number', 'name', 'customer_id', 'start_date', 'end_date', 'num_guests', 'num_adults', 'num_children', 'unit_price', 'child_price', 'vat_rate', 'subtotal', 'tax_amount', 'total_amount', 'paid_amount', 'extra_revenues_total', 'status', 'stage', 'is_featured', 'notes', 'created_by'])]
+#[Fillable(['organization_id', 'tour_number', 'name', 'customer_id', 'start_date', 'end_date', 'num_guests', 'num_adults', 'num_children', 'unit_price', 'child_price', 'vat_rate', 'subtotal', 'tax_amount', 'total_amount', 'paid_amount', 'extra_revenues_total', 'status', 'stage', 'version', 'is_featured', 'notes', 'created_by', 'operated_by'])]
 class Tour extends Model
 {
     protected static function booted(): void
@@ -44,6 +44,11 @@ class Tour extends Model
     public function createdBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function operatedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'operated_by');
     }
 
     public function services(): HasMany

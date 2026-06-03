@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Middleware\CheckPermission;
+use App\Http\Middleware\EnsureSubscriptionActive;
+use App\Http\Middleware\EnsureSuperAdmin;
 use App\Http\Middleware\ResolveOrganization;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -19,6 +21,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'org' => ResolveOrganization::class,
             'permission' => CheckPermission::class,
+            'super_admin' => EnsureSuperAdmin::class,
+            'subscription' => EnsureSubscriptionActive::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

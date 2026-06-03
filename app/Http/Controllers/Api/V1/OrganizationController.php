@@ -84,9 +84,13 @@ class OrganizationController extends Controller
             DB::table('recipe_ingredients')->whereIn('recipe_id', $recipeIds)->orWhereIn('ingredient_id', $productIds)->delete();
             DB::table('recipes')->whereIn('product_id', $productIds)->delete();
             DB::table('products')->where('organization_id', $orgId)->delete();
+
+            // Xóa luôn nhóm hàng (con) rồi ngành hàng (cha)
+            DB::table('product_categories')->where('organization_id', $orgId)->whereNotNull('parent_id')->delete();
+            DB::table('product_categories')->where('organization_id', $orgId)->whereNull('parent_id')->delete();
         });
 
-        return response()->json(['message' => 'Đã xóa toàn bộ sản phẩm']);
+        return response()->json(['message' => 'Đã xóa toàn bộ sản phẩm và nhóm hàng / ngành hàng']);
     }
 
     public function deleteAllCompanies(Request $request): JsonResponse

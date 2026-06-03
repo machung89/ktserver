@@ -319,6 +319,11 @@ class SalesOrderService
                 $this->releaseReservation($order);
             } elseif (in_array($order->status, [OrderStatus::Confirmed, OrderStatus::Shipping, OrderStatus::Completed])) {
                 // Đơn đã xác nhận/giao/hoàn thành: đảo tồn kho và bút toán
+
+                // Giải phóng reserved nếu còn sót (Shipping có thể vẫn còn reserved)
+                $order->loadMissing('items');
+                $this->releaseReservation($order);
+
                 $transactions = InventoryTransaction::where('reference_type', SalesOrder::class)
                     ->where('reference_id', $order->id)
                     ->with('items')
@@ -326,12 +331,19 @@ class SalesOrderService
 
                 foreach ($transactions as $transaction) {
                     foreach ($transaction->items as $txItem) {
-                        // Đảo ngược: trả lại số lượng đã xuất (quantity âm → cộng lại)
+                        // qty trong transaction là số âm (xuất kho), đảo lại = cộng vào kho.
+                        // Truyền avg_cost hiện tại để WAC không bị sai khi "nhập lại".
+                        $currentAvgCost = (float) Inventory::where([
+                            'product_id' => $txItem->product_id,
+                            'warehouse_id' => $transaction->warehouse_id,
+                            'organization_id' => app('orgId'),
+                        ])->value('avg_cost');
+
                         $this->inventoryTransactionService->updateInventoryBalance(
                             $transaction->warehouse_id,
                             $txItem->product_id,
-                            -(float) $txItem->quantity,
-                            0,
+                            -(float) $txItem->quantity,   // âm → dương = nhập lại
+                            $currentAvgCost,              // giữ avg_cost ổn định
                         );
                     }
                     $transaction->items()->delete();

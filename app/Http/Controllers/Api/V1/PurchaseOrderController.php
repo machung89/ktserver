@@ -53,6 +53,8 @@ class PurchaseOrderController extends Controller
             'update_cost_price' => ['sometimes', 'boolean'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
+            'items.*.unit' => ['nullable', 'string', 'max:50'],
+            'items.*.unit_factor' => ['nullable', 'numeric', 'min:0.0001'],
             'items.*.quantity' => ['required', 'numeric', 'min:0.001'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
@@ -83,6 +85,8 @@ class PurchaseOrderController extends Controller
 
             $order->items()->create([
                 'product_id' => $item['product_id'],
+                'unit' => $item['unit'] ?? null,
+                'unit_factor' => $item['unit_factor'] ?? 1,
                 'quantity' => $item['quantity'],
                 'unit_price' => $item['unit_price'],
                 'tax_rate' => $taxRate,
@@ -133,9 +137,45 @@ class PurchaseOrderController extends Controller
             'warehouse_id' => ['sometimes', 'exists:warehouses,id'],
             'order_date' => ['sometimes', 'date'],
             'notes' => ['nullable', 'string'],
+            'update_cost_price' => ['sometimes', 'boolean'],
+            'items' => ['sometimes', 'array', 'min:1'],
+            'items.*.product_id' => ['required_with:items', 'exists:products,id'],
+            'items.*.unit' => ['nullable', 'string', 'max:50'],
+            'items.*.unit_factor' => ['nullable', 'numeric', 'min:0.0001'],
+            'items.*.quantity' => ['required_with:items', 'numeric', 'min:0.001'],
+            'items.*.unit_price' => ['required_with:items', 'numeric', 'min:0'],
+            'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
 
-        $purchaseOrder->update($validated);
+        $purchaseOrder->update(\Arr::except($validated, ['items', 'update_cost_price']));
+
+        if (! empty($validated['items'])) {
+            $purchaseOrder->items()->delete();
+            $subtotal = 0;
+            $taxAmount = 0;
+            foreach ($validated['items'] as $item) {
+                $amount = $item['quantity'] * $item['unit_price'];
+                $taxRate = $item['tax_rate'] ?? 0;
+                $subtotal += $amount;
+                $taxAmount += $amount * $taxRate / 100;
+                $purchaseOrder->items()->create([
+                    'product_id' => $item['product_id'],
+                    'unit' => $item['unit'] ?? null,
+                    'unit_factor' => $item['unit_factor'] ?? 1,
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $item['unit_price'],
+                    'tax_rate' => $taxRate,
+                    'amount' => $amount,
+                ]);
+            }
+            $purchaseOrder->update(['subtotal' => $subtotal, 'tax_amount' => $taxAmount, 'total_amount' => $subtotal + $taxAmount]);
+
+            if (! empty($validated['update_cost_price'])) {
+                foreach ($validated['items'] as $item) {
+                    Product::where('id', $item['product_id'])->update(['cost_price' => $item['unit_price']]);
+                }
+            }
+        }
 
         $this->activityLog->log(
             $this->orgId(), Auth::id(),

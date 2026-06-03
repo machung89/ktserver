@@ -300,6 +300,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::middleware('permission:tours.view')->group(function () {
             Route::get('tours', [TourController::class, 'index']);
             Route::get('tours/{tour}', [TourController::class, 'show']);
+            Route::get('tour-dashboard', [TourController::class, 'dashboard']);
         });
         Route::post('tours', [TourController::class, 'store'])->middleware('permission:tours.quote', 'subscription');
         Route::put('tours/{tour}', [TourController::class, 'update'])->middleware('permission:tours.quote');

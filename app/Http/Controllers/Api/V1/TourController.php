@@ -31,6 +31,92 @@ class TourController extends Controller
         protected ActivityLogService $activityLog,
     ) {}
 
+    public function dashboard(): JsonResponse
+    {
+        /** @var User $user */
+        $user = Auth::user();
+        $canViewAll = $user->hasPermission('tours.view_all');
+        $orgId = $this->orgId();
+        $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
+
+        $base = Tour::query()
+            ->when($createdByFilter, fn ($q) => $q->where(function ($sub) use ($createdByFilter) {
+                $sub->whereIn('created_by', $createdByFilter)->orWhere('operated_by', Auth::id());
+            }));
+
+        // Đếm theo trạng thái
+        $counts = (clone $base)->where('status', '!=', 'cancelled')
+            ->selectRaw('status, stage, COUNT(*) as cnt')
+            ->groupBy('status', 'stage')
+            ->get();
+
+        $byStatus = fn (string $status) => $counts->where('status', $status)->sum('cnt');
+        $byStage = fn (string $stage) => $counts->where('stage', $stage)->sum('cnt');
+
+        // Phải thu / phải trả (tour active)
+        $activeTours = (clone $base)->where('status', '!=', 'cancelled')
+            ->withSum(['services as services_cost_total' => fn ($q) => $q->where('service_stage', 'operating')], 'cost')
+            ->withSum(['services as services_paid_total' => fn ($q) => $q->whereIn('service_stage', ['operating', 'settlement'])], 'paid_amount')
+            ->get(['id', 'total_amount', 'paid_amount', 'extra_revenues_total', 'status', 'stage']);
+
+        $totalReceivable = $activeTours->sum(fn ($t) => max(0, (float) $t->total_amount - (float) $t->paid_amount));
+        $totalPayable = $activeTours->sum(fn ($t) => max(0, (float) ($t->services_cost_total ?? 0) - (float) ($t->services_paid_total ?? 0)));
+
+        // Lệnh thanh toán chờ duyệt
+        $pendingPayments = TourPaymentRequest::where('status', 'pending')->count();
+
+        // Tour nổi bật đang hoạt động
+        $featured = Tour::where('is_featured', true)
+            ->where('status', '!=', 'cancelled')
+            ->with('customer:id,name')
+            ->when($createdByFilter, fn ($q) => $q->where(function ($sub) use ($createdByFilter) {
+                $sub->whereIn('created_by', $createdByFilter)->orWhere('operated_by', Auth::id());
+            }))
+            ->orderByDesc('start_date')
+            ->limit(5)
+            ->get(['id', 'tour_number', 'name', 'customer_id', 'start_date', 'end_date', 'num_guests', 'total_amount', 'status', 'stage', 'is_featured']);
+
+        // Doanh thu tour 12 tháng (từ completed + confirmed tours)
+        $from = now()->subMonths(11)->startOfMonth()->toDateString();
+        $monthly = DB::table('tours')
+            ->where('organization_id', $orgId)
+            ->whereIn('status', ['confirmed', 'completed'])
+            ->where('start_date', '>=', $from)
+            ->when(! $canViewAll, fn ($q) => $q->where(function ($sub) use ($createdByFilter) {
+                $sub->whereIn('created_by', $createdByFilter)->orWhere('operated_by', Auth::id());
+            }))
+            ->selectRaw("DATE_FORMAT(start_date, '%Y-%m') as month, SUM(total_amount) as revenue, COUNT(*) as count")
+            ->groupByRaw("DATE_FORMAT(start_date, '%Y-%m')")
+            ->orderBy('month')
+            ->get();
+
+        return response()->json([
+            'counts' => [
+                'draft' => (int) $byStatus('draft'),
+                'confirmed' => (int) $byStatus('confirmed'),
+                'completed' => (int) $byStatus('completed'),
+                'operating' => (int) $byStage('operating'),
+                'settling' => (int) $byStage('settling'),
+            ],
+            'total_receivable' => $totalReceivable,
+            'total_payable' => $totalPayable,
+            'pending_payments' => $pendingPayments,
+            'featured' => $featured->map(fn ($t) => [
+                'id' => $t->id,
+                'tour_number' => $t->tour_number,
+                'name' => $t->name,
+                'customer_name' => $t->customer?->name,
+                'start_date' => $t->start_date?->toDateString(),
+                'end_date' => $t->end_date?->toDateString(),
+                'num_guests' => $t->num_guests,
+                'total_amount' => (float) $t->total_amount,
+                'status' => $t->status,
+                'stage' => $t->stage,
+            ]),
+            'monthly' => $monthly,
+        ]);
+    }
+
     public function index(Request $request): JsonResponse
     {
         /** @var User $user */

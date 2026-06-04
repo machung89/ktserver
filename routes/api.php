@@ -166,6 +166,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         // Mua hàng
         Route::middleware('permission:purchases.view')->group(function () {
             Route::get('purchases', [PurchaseOrderController::class, 'index']);
+            Route::get('purchases/suggest', [PurchaseOrderController::class, 'suggest']);
             Route::get('purchases/{purchaseOrder}', [PurchaseOrderController::class, 'show']);
         });
         Route::post('purchases', [PurchaseOrderController::class, 'store'])->middleware('permission:purchases.create', 'subscription');
@@ -242,6 +243,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
 
         // Báo cáo
         Route::middleware('permission:reports.view')->group(function () {
+            Route::get('reports/dashboard-summary', [ReportController::class, 'dashboardSummary']);
             Route::get('reports/cashbook', [ReportController::class, 'cashbook']);
             Route::get('reports/inventory', [ReportController::class, 'inventory']);
             Route::get('reports/receivables', [ReportController::class, 'receivables']);

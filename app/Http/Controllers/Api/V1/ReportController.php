@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\JournalEntryLine;
+use App\Models\Organization;
 use App\Models\Payment;
 use App\Models\User;
 use Carbon\Carbon;
@@ -18,6 +19,169 @@ use Illuminate\Support\Facades\DB;
 class ReportController extends Controller
 {
     use ScopedByOrganization;
+
+    /**
+     * Số liệu tổng quan cho dashboard: doanh thu & nhập trong tháng (gồm cả đơn nháp),
+     * tổng công nợ phải thu của khách hàng.
+     */
+    public function dashboardSummary(): JsonResponse
+    {
+        /** @var User $user */
+        $user = auth()->user();
+        $orgId = $this->orgId();
+        $monthStart = now()->startOfMonth()->toDateString();
+        $monthEnd = now()->endOfMonth()->toDateString();
+
+        // Phạm vi xem dữ liệu: null = xem tất cả; ngược lại chỉ đơn của mình + người được phép xem.
+        $salesCreators = $user->hasPermission('sales.view_all')
+            ? null
+            : array_merge([$user->id], $user->getViewableUserIds());
+        $purchaseCreators = $user->hasPermission('purchases.view_all')
+            ? null
+            : array_merge([$user->id], $user->getViewableUserIds());
+
+        // Doanh thu tháng — gồm cả đơn nháp, bỏ đơn đã hủy
+        $revenueMonth = (float) DB::table('sales_orders')
+            ->where('organization_id', $orgId)
+            ->where('status', '!=', 'cancelled')
+            ->whereBetween('order_date', [$monthStart, $monthEnd])
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->sum('total_amount');
+
+        // Tổng nhập tháng — gồm cả đơn nháp, bỏ đơn đã hủy
+        $purchaseMonth = (float) DB::table('purchase_orders')
+            ->where('organization_id', $orgId)
+            ->where('status', '!=', 'cancelled')
+            ->whereBetween('order_date', [$monthStart, $monthEnd])
+            ->when($purchaseCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->sum('total_amount');
+
+        // Tổng công nợ phải thu — đơn bán đã xác nhận/giao/hoàn thành còn nợ
+        $totalDebt = (float) DB::table('sales_orders')
+            ->where('organization_id', $orgId)
+            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
+            ->whereRaw('total_amount - paid_amount > 0.01')
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->selectRaw('COALESCE(SUM(total_amount - paid_amount), 0) as debt')
+            ->value('debt');
+
+        // Giá trị tồn kho hiện tại = Σ(số lượng × giá vốn bình quân) từ bảng inventories (nguồn chuẩn)
+        $inventoryValue = (float) DB::table('inventories')
+            ->where('organization_id', $orgId)
+            ->selectRaw('COALESCE(SUM(quantity * avg_cost), 0) as val')
+            ->value('val');
+
+        // ── Sản phẩm sắp hết: tồn khả dụng ≤ tối thiểu HOẶC số ngày bán hết < ngưỡng ──
+        $coverDays = (int) (Organization::find($orgId)?->setting('low_stock_cover_days', 7) ?? 7);
+        $from = now()->subDays(30)->toDateString();
+
+        $velocitySub = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('so.order_date', '>=', $from)
+            ->where('soi.is_return', false)
+            ->groupBy('soi.product_id')
+            ->selectRaw('soi.product_id, SUM(soi.quantity) / 30 as velocity');
+
+        $lowStockBase = DB::table('inventories as i')
+            ->leftJoinSub($velocitySub, 'v', 'v.product_id', '=', 'i.product_id')
+            ->join('products as p', 'p.id', '=', 'i.product_id')
+            ->join('warehouses as w', 'w.id', '=', 'i.warehouse_id')
+            ->where('i.organization_id', $orgId)
+            ->where('p.is_active', true)
+            ->where(function ($q) use ($coverDays) {
+                $q->whereRaw('(i.quantity - i.reserved_quantity) <= i.min_quantity')
+                    ->orWhereRaw('COALESCE(v.velocity, 0) > 0 AND (i.quantity - i.reserved_quantity) / v.velocity < ?', [$coverDays]);
+            });
+
+        $lowStockCount = (clone $lowStockBase)->count();
+
+        $lowStockItems = (clone $lowStockBase)
+            ->selectRaw('p.code as product_code, p.name as product_name, p.unit, w.name as warehouse,
+                (i.quantity - i.reserved_quantity) as available, i.min_quantity,
+                CASE WHEN COALESCE(v.velocity,0) > 0 THEN ROUND((i.quantity - i.reserved_quantity) / v.velocity, 1) ELSE NULL END as days_of_cover')
+            ->orderByRaw('days_of_cover IS NULL, days_of_cover ASC, available ASC')
+            ->limit(10)
+            ->get();
+
+        // ── Thống kê năm nay ──
+        $yearStart = now()->startOfYear()->toDateString();
+        $yearEnd = now()->endOfYear()->toDateString();
+
+        // Doanh thu & giá vốn năm nay (đơn đã xác nhận/giao/hoàn thành), gồm thuế như biểu đồ tháng
+        $yearAgg = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->whereBetween('so.order_date', [$yearStart, $yearEnd])
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->selectRaw('COALESCE(SUM(soi.amount * (1 + soi.tax_rate / 100)), 0) as revenue, COALESCE(SUM(soi.quantity * soi.cost_price), 0) as cost')
+            ->first();
+
+        $yearRevenue = (float) ($yearAgg->revenue ?? 0);
+        $yearCost = (float) ($yearAgg->cost ?? 0);
+
+        $yearOrders = (int) DB::table('sales_orders')
+            ->where('organization_id', $orgId)
+            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
+            ->whereBetween('order_date', [$yearStart, $yearEnd])
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->count();
+
+        $yearPurchase = (float) DB::table('purchase_orders')
+            ->where('organization_id', $orgId)
+            ->where('status', '!=', 'cancelled')
+            ->whereBetween('order_date', [$yearStart, $yearEnd])
+            ->when($purchaseCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->sum('total_amount');
+
+        // Doanh thu 12 tháng gần nhất (đã lọc theo quyền xem) cho biểu đồ
+        $monthlyFrom = now()->subMonths(11)->startOfMonth()->toDateString();
+        $monthly = DB::table('sales_orders')
+            ->where('organization_id', $orgId)
+            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
+            ->where('order_date', '>=', $monthlyFrom)
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->groupByRaw("DATE_FORMAT(order_date, '%Y-%m')")
+            ->orderByRaw("DATE_FORMAT(order_date, '%Y-%m')")
+            ->selectRaw("DATE_FORMAT(order_date, '%Y-%m') as month, SUM(total_amount) as revenue")
+            ->get();
+
+        // ── Sản phẩm bán chạy nhất trong 30 ngày gần nhất (theo số lượng) ──
+        $topProducts = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->join('products as p', 'p.id', '=', 'soi.product_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('so.order_date', '>=', $from)
+            ->where('soi.is_return', false)
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->groupBy('soi.product_id', 'p.code', 'p.name', 'p.unit')
+            ->selectRaw('p.code as product_code, p.name as product_name, p.unit, SUM(soi.quantity) as quantity, SUM(soi.amount) as revenue')
+            ->havingRaw('SUM(soi.quantity) > 0')
+            ->orderByDesc('quantity')
+            ->limit(10)
+            ->get();
+
+        return response()->json([
+            'revenue_month' => $revenueMonth,
+            'purchase_month' => $purchaseMonth,
+            'total_debt' => $totalDebt,
+            'inventory_value' => $inventoryValue,
+            'low_stock_count' => $lowStockCount,
+            'low_stock_items' => $lowStockItems,
+            'top_products' => $topProducts,
+            'year' => [
+                'revenue' => $yearRevenue,
+                'cost' => $yearCost,
+                'gross_profit' => round($yearRevenue - $yearCost, 2),
+                'orders' => $yearOrders,
+                'purchase' => $yearPurchase,
+            ],
+            'monthly' => $monthly,
+        ]);
+    }
 
     public function inventory(Request $request): JsonResponse
     {
@@ -110,6 +274,7 @@ class ReportController extends Controller
         $sales = DB::table('sales_orders')
             ->where('organization_id', $orgId)
             ->whereIn('status', ['confirmed', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('created_by', $v))
             ->groupBy('company_id')
             ->select('company_id', DB::raw('SUM(total_amount) as total'))
             ->pluck('total', 'company_id');
@@ -148,6 +313,7 @@ class ReportController extends Controller
         $purchases = DB::table('purchase_orders')
             ->where('organization_id', $orgId)
             ->whereIn('status', ['confirmed', 'completed'])
+            ->when($this->purchaseCreatorFilter(), fn ($q, $v) => $q->whereIn('created_by', $v))
             ->groupBy('company_id')
             ->select('company_id', DB::raw('SUM(total_amount) as total'))
             ->pluck('total', 'company_id');
@@ -198,6 +364,28 @@ class ReportController extends Controller
         return $user?->hasPermission('reports.view_profit') ?? false;
     }
 
+    /**
+     * Phạm vi xem báo cáo bán hàng: null = xem tất cả; ngược lại chỉ đơn của mình + người được phép xem.
+     *
+     * @return array<int>|null
+     */
+    private function salesCreatorFilter(): ?array
+    {
+        /** @var User $user */
+        $user = auth()->user();
+
+        return $user->hasPermission('sales.view_all') ? null : array_merge([$user->id], $user->getViewableUserIds());
+    }
+
+    /** @return array<int>|null */
+    private function purchaseCreatorFilter(): ?array
+    {
+        /** @var User $user */
+        $user = auth()->user();
+
+        return $user->hasPermission('purchases.view_all') ? null : array_merge([$user->id], $user->getViewableUserIds());
+    }
+
     private function stripProfitFields(array $row): array
     {
         unset($row['cost'], $row['profit'], $row['margin'], $row['standard_total'], $row['employee_profit']);
@@ -219,6 +407,7 @@ class ReportController extends Controller
             ->leftJoin('product_categories as parent', 'parent.id', '=', 'cat.parent_id')
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->when($request->category_id, fn ($q, $v) => $q->where('p.category_id', $v))
@@ -286,6 +475,7 @@ class ReportController extends Controller
             })
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy(DB::raw('DATE(so.order_date)'))
@@ -339,6 +529,7 @@ class ReportController extends Controller
             })
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy(DB::raw("DATE_FORMAT(so.order_date, '%Y-%m')"))
@@ -393,6 +584,7 @@ class ReportController extends Controller
             ->leftJoin('product_categories as parent_pc', 'parent_pc.id', '=', 'pc.parent_id')
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->where('soi.is_return', false)
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
@@ -449,6 +641,7 @@ class ReportController extends Controller
             ->leftJoin('product_categories as parent_cat', 'parent_cat.id', '=', 'cat.parent_id')
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->where('soi.is_return', false)
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
@@ -855,6 +1048,7 @@ class ReportController extends Controller
             })
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy('u.id', 'u.name', 'u.department', 'u.position')

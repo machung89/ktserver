@@ -15,6 +15,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class PurchaseOrderController extends Controller
@@ -25,6 +26,88 @@ class PurchaseOrderController extends Controller
         protected PurchaseOrderService $purchaseOrderService,
         protected ActivityLogService $activityLog,
     ) {}
+
+    /**
+     * Đề xuất danh sách hàng cần nhập để đủ bán trong N ngày (mặc định 15),
+     * dựa trên tốc độ bán 30 ngày gần nhất và tồn khả dụng hiện tại.
+     */
+    public function suggest(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'days' => ['nullable', 'integer', 'min:1', 'max:365'],
+            'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
+        ]);
+
+        $orgId = $this->orgId();
+        $coverDays = (int) ($validated['days'] ?? 15);
+        $warehouseId = $validated['warehouse_id'] ?? null;
+        $window = 30;
+        $from = now()->subDays($window)->toDateString();
+
+        // Tốc độ bán 30 ngày theo sản phẩm
+        $soldMap = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('so.order_date', '>=', $from)
+            ->where('soi.is_return', false)
+            ->groupBy('soi.product_id')
+            ->selectRaw('soi.product_id, SUM(soi.quantity) as sold')
+            ->pluck('sold', 'soi.product_id');
+
+        if ($soldMap->isEmpty()) {
+            return response()->json(['data' => []]);
+        }
+
+        $productIds = $soldMap->keys()->all();
+
+        // Tồn khả dụng (theo kho chọn, hoặc tổng tất cả kho)
+        $stockMap = DB::table('inventories')
+            ->where('organization_id', $orgId)
+            ->whereIn('product_id', $productIds)
+            ->when($warehouseId, fn ($q, $v) => $q->where('warehouse_id', $v))
+            ->groupBy('product_id')
+            ->selectRaw('product_id, SUM(quantity - reserved_quantity) as available')
+            ->pluck('available', 'product_id');
+
+        $products = Product::whereIn('id', $productIds)->where('is_active', true)->get()->keyBy('id');
+
+        $items = [];
+        foreach ($soldMap as $pid => $sold) {
+            $product = $products->get($pid);
+            if (! $product) {
+                continue;
+            }
+
+            $velocity = (float) $sold / $window;
+            if ($velocity <= 0) {
+                continue;
+            }
+
+            $available = (float) ($stockMap[$pid] ?? 0);
+            $suggestQty = $velocity * $coverDays - $available; // cần nhập thêm để đủ N ngày
+            if ($suggestQty < 0.001) {
+                continue;
+            }
+
+            $items[] = [
+                'product_id' => $product->id,
+                'product_code' => $product->code,
+                'product_name' => $product->name,
+                'unit' => $product->unit,
+                'velocity' => round($velocity, 2),
+                'available' => round($available, 2),
+                'days_of_cover' => round($available / $velocity, 1),
+                'suggest_qty' => (float) ceil($suggestQty),
+                'cost_price' => (float) ($product->cost_price ?? 0),
+            ];
+        }
+
+        // Ưu tiên SP còn ít ngày bán nhất lên đầu
+        usort($items, fn ($a, $b) => $a['days_of_cover'] <=> $b['days_of_cover']);
+
+        return response()->json(['data' => $items]);
+    }
 
     public function index(Request $request): AnonymousResourceCollection
     {

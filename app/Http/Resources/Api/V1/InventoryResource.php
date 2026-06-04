@@ -18,7 +18,9 @@ class InventoryResource extends JsonResource
             'available_quantity' => $this->available_quantity,
             'avg_cost' => $this->avg_cost,
             'min_quantity' => $this->min_quantity,
-            'is_low_stock' => $this->quantity <= $this->min_quantity,
+            'sales_velocity' => $this->sales_velocity ?? null,
+            'days_of_cover' => $this->days_of_cover ?? null,
+            'is_low_stock' => $this->isLowStock(),
             'product_code' => $this->product?->code,
             'product_name' => $this->product?->name,
             'unit' => $this->product?->unit,
@@ -26,5 +28,23 @@ class InventoryResource extends JsonResource
             'product' => new ProductResource($this->whenLoaded('product')),
             'updated_at' => $this->updated_at,
         ];
+    }
+
+    /**
+     * Sắp hết hàng khi: hàng có thể bán ≤ mức tối thiểu,
+     * HOẶC số ngày tồn còn lại < ngưỡng (theo tốc độ bán).
+     */
+    private function isLowStock(): bool
+    {
+        $available = (float) $this->available_quantity;
+
+        if ($available <= (float) $this->min_quantity) {
+            return true;
+        }
+
+        $daysOfCover = $this->days_of_cover ?? null;
+        $coverDays = $this->low_stock_cover_days ?? null;
+
+        return $daysOfCover !== null && $coverDays !== null && $daysOfCover < $coverDays;
     }
 }

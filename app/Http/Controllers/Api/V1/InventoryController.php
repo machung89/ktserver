@@ -7,15 +7,24 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\InventoryResource;
 use App\Models\Inventory;
 use App\Models\InventoryTransactionItem;
+use App\Models\Organization;
 use App\Models\Product;
 use App\Models\Warehouse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 class InventoryController extends Controller
 {
     use ScopedByOrganization;
+
+    /** Số ngày bán hết mặc định để cảnh báo sắp hết (có thể chỉnh qua cài đặt tổ chức) */
+    private const DEFAULT_COVER_DAYS = 7;
+
+    /** Số ngày lịch sử dùng tính tốc độ bán trung bình */
+    private const VELOCITY_WINDOW = 30;
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -30,7 +39,48 @@ class InventoryController extends Controller
 
         $inventory = $query->paginate($perPage);
 
+        $this->attachSalesVelocity($inventory->getCollection());
+
         return InventoryResource::collection($inventory);
+    }
+
+    /**
+     * Gắn tốc độ bán & số ngày tồn còn lại (days_of_cover) cho từng dòng tồn kho.
+     * Dùng 1 truy vấn gộp lấy số bán {VELOCITY_WINDOW} ngày của các SP trên trang — không N+1.
+     *
+     * @param  Collection<int, Inventory>  $items
+     */
+    private function attachSalesVelocity($items): void
+    {
+        if ($items->isEmpty()) {
+            return;
+        }
+
+        $orgId = $this->orgId();
+        $productIds = $items->pluck('product_id')->unique()->all();
+        $from = now()->subDays(self::VELOCITY_WINDOW)->toDateString();
+
+        $soldMap = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('so.order_date', '>=', $from)
+            ->where('soi.is_return', false)
+            ->whereIn('soi.product_id', $productIds)
+            ->groupBy('soi.product_id')
+            ->selectRaw('soi.product_id, SUM(soi.quantity) as sold')
+            ->pluck('sold', 'soi.product_id');
+
+        $coverDays = (int) (Organization::find($orgId)?->setting('low_stock_cover_days', self::DEFAULT_COVER_DAYS) ?? self::DEFAULT_COVER_DAYS);
+
+        foreach ($items as $inv) {
+            $velocity = (float) ($soldMap[$inv->product_id] ?? 0) / self::VELOCITY_WINDOW;
+            $available = (float) $inv->available_quantity;
+
+            $inv->sales_velocity = round($velocity, 3);
+            $inv->days_of_cover = $velocity > 0 ? round($available / $velocity, 1) : null;
+            $inv->low_stock_cover_days = $coverDays;
+        }
     }
 
     public function byProduct(Product $product): AnonymousResourceCollection

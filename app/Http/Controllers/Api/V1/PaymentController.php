@@ -8,6 +8,8 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PaymentResource;
 use App\Models\JournalEntry;
 use App\Models\Payment;
+use App\Models\PurchaseOrder;
+use App\Models\SalesOrder;
 use App\Models\Tour;
 use App\Models\TourPaymentRequest;
 use App\Models\TourService;
@@ -126,11 +128,20 @@ class PaymentController extends Controller
             PaymentType::Payment->value => 'Chi tiền',
             PaymentType::Transfer->value => 'Chuyển khoản',
         ];
+
+        // Gắn nhật ký vào đơn bán/nhập nếu phiếu liên kết, để hiển thị trong lịch sử đơn
+        $logSubjectType = match ($validated['reference_type'] ?? null) {
+            SalesOrder::class => 'sales_order',
+            PurchaseOrder::class => 'purchase_order',
+            default => 'payment',
+        };
+        $logSubjectId = $logSubjectType === 'payment' ? $payment->id : (int) $validated['reference_id'];
+
         $this->activityLog->log(
             $this->orgId(), Auth::id(),
             'payment_created',
-            ($typeLabels[$validated['type']] ?? 'Phiếu').': '.number_format((float) $validated['amount']).'đ',
-            null, [], 'payment', $payment->id
+            'Tạo phiếu '.($typeLabels[$validated['type']] ?? '').' '.$payment->payment_number.': '.number_format((float) $validated['amount']).'đ',
+            null, [], $logSubjectType, $logSubjectId
         );
 
         return (new PaymentResource($payment))->response()->setStatusCode(201);
@@ -162,8 +173,17 @@ class PaymentController extends Controller
     public function destroy(Payment $payment): JsonResponse
     {
         $paymentId = $payment->id;
+        $paymentNumber = $payment->payment_number;
         $paymentAmount = (float) $payment->amount;
         $paymentType = $payment->type instanceof PaymentType ? $payment->type->value : (string) $payment->type;
+
+        // Nếu phiếu liên kết đơn bán/nhập → ghi nhật ký vào đơn để hiển thị trong lịch sử đơn
+        $logSubjectType = match ($payment->reference_type) {
+            SalesOrder::class => 'sales_order',
+            PurchaseOrder::class => 'purchase_order',
+            default => 'payment',
+        };
+        $logSubjectId = $logSubjectType === 'payment' ? $paymentId : (int) $payment->reference_id;
 
         DB::transaction(function () use ($payment) {
             JournalEntry::where('reference_type', Payment::class)
@@ -215,7 +235,15 @@ class PaymentController extends Controller
                 }
             }
 
+            // Lấy đơn liên kết trước khi xóa để đồng bộ lại trạng thái thanh toán sau đó
+            $orderRef = in_array($payment->reference_type, [SalesOrder::class, PurchaseOrder::class], true)
+                ? $payment->reference
+                : null;
+
             $payment->delete();
+
+            // Tính lại paid_amount & payment_status cho đơn bán/nhập (sum loại bỏ phiếu vừa xóa)
+            $orderRef?->syncPaymentStatus();
         });
 
         $typeLabels = [
@@ -226,8 +254,8 @@ class PaymentController extends Controller
         $this->activityLog->log(
             $this->orgId(), Auth::id(),
             'payment_deleted',
-            'Xóa '.($typeLabels[$paymentType] ?? 'phiếu').': '.number_format($paymentAmount).'đ',
-            null, [], 'payment', $paymentId
+            'Xóa phiếu '.($typeLabels[$paymentType] ?? '').' '.$paymentNumber.': '.number_format($paymentAmount).'đ',
+            null, [], $logSubjectType, $logSubjectId
         );
 
         return response()->json(null, 204);

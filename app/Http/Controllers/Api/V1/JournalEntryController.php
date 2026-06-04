@@ -24,6 +24,13 @@ class JournalEntryController extends Controller
         $entries = JournalEntry::with('lines.account')
             ->when($request->from, fn ($q, $v) => $q->where('entry_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('entry_date', '<=', $v))
+            ->when($request->search, function ($q, $v) {
+                $q->where(function ($q) use ($v) {
+                    $q->where('entry_number', 'like', "%{$v}%")
+                        ->orWhere('description', 'like', "%{$v}%")
+                        ->orWhereHas('lines', fn ($lq) => $lq->where('description', 'like', "%{$v}%"));
+                });
+            })
             ->latest('entry_date')
             ->paginate(30);
 

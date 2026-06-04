@@ -610,6 +610,20 @@ class SalesOrderController extends Controller
         return new SalesOrderResource($result);
     }
 
+    public function revertToDraft(SalesOrder $salesOrder): SalesOrderResource
+    {
+        $result = $this->salesOrderService->revertToDraft($salesOrder);
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'sales_order_reverted',
+            "Đảo đơn bán {$salesOrder->order_number} về nháp — đã hủy bút toán và tồn kho",
+            null, [], 'sales_order', $salesOrder->id
+        );
+
+        return new SalesOrderResource($result->load(['company', 'createdBy', 'items.product']));
+    }
+
     private function releaseTableIfIdle(SalesOrder $order): void
     {
         if (! $order->restaurant_table_id) {

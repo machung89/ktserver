@@ -206,6 +206,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('sales/{salesOrder}/ship', [SalesOrderController::class, 'ship'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/complete', [SalesOrderController::class, 'complete'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/cancel', [SalesOrderController::class, 'cancel'])->middleware('permission:sales.cancel');
+        Route::post('sales/{salesOrder}/revert-to-draft', [SalesOrderController::class, 'revertToDraft'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/return-items', [SalesOrderController::class, 'returnItems'])->middleware('permission:sales.confirm');
         Route::patch('sales/{salesOrder}/items/{salesOrderItem}', [SalesOrderController::class, 'updateItem'])->middleware('permission:sales.view');
 

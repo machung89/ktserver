@@ -11,9 +11,13 @@ trait HasPaymentStatus
         $paid = (float) $this->payments()->sum('amount');
         $total = (float) $this->total_amount;
 
+        // Đơn hoàn tiền có total âm nhưng phiếu chi lưu amount dương → so sánh theo trị tuyệt đối
+        $paidAbs = abs($paid);
+        $totalAbs = abs($total);
+
         $status = match (true) {
-            $paid <= 0 => PaymentStatus::Unpaid,
-            $paid >= $total => PaymentStatus::Paid,
+            $paidAbs < 0.01 => PaymentStatus::Unpaid,
+            $paidAbs >= $totalAbs - 0.01 => PaymentStatus::Paid,
             default => PaymentStatus::Partial,
         };
 

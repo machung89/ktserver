@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
 use App\Enums\TransactionType;
 use App\Models\Inventory;
 use App\Models\InventoryTransaction;
@@ -222,6 +223,7 @@ class SalesOrderService
             $returnDate = $data['return_date'];
             $returnNote = $data['notes'] ?? null;
             $totalRevenue = 0;
+            $totalTax = 0;
             $totalCost = 0;
             $inventoryByWarehouse = [];
 
@@ -234,9 +236,19 @@ class SalesOrderService
                 $original = $positiveItems->first(fn ($i) => $i->product_id === $productId && $i->warehouse_id === $warehouseId);
                 $unitPrice = $original ? (float) $original->unit_price : 0;
                 $costPrice = $original ? (float) $original->cost_price : 0;
-                $amount = round(-$qty * $unitPrice, 2);
+                $taxRate = $original ? (float) $original->tax_rate : 0;
+
+                // Thành tiền hoàn theo tỷ lệ trên net amount gốc (đã trừ chiết khấu),
+                // không dùng unit_price gốc để tránh bỏ sót chiết khấu.
+                $origQty = $original ? (float) $original->quantity : 0;
+                $netUnit = $origQty != 0 ? (float) $original->amount / $origQty : $unitPrice;
+                $netAmount = round($qty * $netUnit, 2);   // net dương của phần hoàn
+                $amount = -$netAmount;                     // lưu âm
                 $cost = round($qty * $costPrice, 2);
-                $totalRevenue += abs($amount);
+                $lineTax = round($netAmount * $taxRate / 100, 2);
+
+                $totalRevenue += $netAmount;
+                $totalTax += $lineTax;
                 $totalCost += $cost;
 
                 $order->items()->create([
@@ -245,7 +257,10 @@ class SalesOrderService
                     'quantity' => -$qty,
                     'unit_price' => $unitPrice,
                     'cost_price' => $costPrice,
-                    'tax_rate' => $original ? $original->tax_rate : 0,
+                    'standard_price' => $original ? (float) $original->standard_price : 0,
+                    'discount_type' => $original?->discount_type,
+                    'discount_value' => $original ? (float) $original->discount_value : 0,
+                    'tax_rate' => $taxRate,
                     'amount' => $amount,
                     'is_return' => true,
                     'return_date' => $returnDate,
@@ -263,10 +278,15 @@ class SalesOrderService
             $order->load('items');
             $newSubtotal = (float) $order->items->sum('amount');
             $newTaxAmount = (float) $order->items->sum(fn ($i) => $i->amount * $i->tax_rate / 100);
+            $newTotal = round($newSubtotal + $newTaxAmount, 2);
+            // Giá chuẩn & lời/lỗ NV theo số lượng ròng (dòng hoàn có qty âm nên tự trừ)
+            $newStandardTotal = round((float) $order->items->sum(fn ($i) => (float) $i->quantity * (float) $i->standard_price), 2);
             $order->update([
                 'subtotal' => round($newSubtotal, 2),
                 'tax_amount' => round($newTaxAmount, 2),
-                'total_amount' => round($newSubtotal + $newTaxAmount, 2),
+                'total_amount' => $newTotal,
+                'standard_total' => $newStandardTotal,
+                'employee_profit' => $newStandardTotal > 0 ? round($newTotal - $newStandardTotal, 2) : 0,
             ]);
 
             // Đồng bộ trạng thái thanh toán theo tổng tiền mới
@@ -286,11 +306,17 @@ class SalesOrderService
 
             if ($totalRevenue > 0) {
                 $desc = "Hàng bán bị trả lại - {$order->order_number}";
-                // Đảo chiều bút toán bán hàng: Nợ 511 / Có 131 + Nợ 156 / Có 632
+                $totalGross = round($totalRevenue + $totalTax, 2);
+                // Đảo chiều bút toán bán hàng: Nợ 511 (+ Nợ 33311 thuế) / Có 131 + Nợ 156 / Có 632
                 $lines = [
                     ['account_code' => '511', 'description' => $desc, 'debit' => $totalRevenue, 'credit' => 0],
-                    ['account_code' => '131', 'description' => $desc, 'debit' => 0, 'credit' => $totalRevenue],
                 ];
+
+                if ($totalTax > 0) {
+                    $lines[] = ['account_code' => '33311', 'description' => "Thuế GTGT hàng trả lại - {$order->order_number}", 'debit' => $totalTax, 'credit' => 0];
+                }
+
+                $lines[] = ['account_code' => '131', 'description' => $desc, 'debit' => 0, 'credit' => $totalGross];
 
                 if ($totalCost > 0) {
                     $lines[] = ['account_code' => '156', 'description' => $desc, 'debit' => $totalCost, 'credit' => 0];
@@ -313,6 +339,81 @@ class SalesOrderService
             $order->syncPaymentStatus();
 
             return $order->fresh(['company', 'items.product', 'items.warehouse']);
+        });
+    }
+
+    /**
+     * Đảo đơn bán đã xác nhận/giao/hoàn thành về nháp:
+     * - Đảo tồn kho (cộng lại số đã xuất, giữ avg_cost)
+     * - Xóa bút toán liên quan
+     * - Đặt lại reserved_quantity (đơn nháp giữ chỗ tồn kho)
+     *
+     * Chặn nếu đơn đã có thanh toán hoặc đã hoàn trả hàng.
+     */
+    public function revertToDraft(SalesOrder $order): SalesOrder
+    {
+        return DB::transaction(function () use ($order) {
+            $order = SalesOrder::with('items')->lockForUpdate()->find($order->id);
+
+            if (! in_array($order->status, [OrderStatus::Confirmed, OrderStatus::Shipping, OrderStatus::Completed])) {
+                throw ValidationException::withMessages(['status' => ['Chỉ có thể đảo về nháp từ đơn đã xác nhận, đang giao hoặc hoàn thành.']]);
+            }
+
+            // Chặn khi đã có thanh toán (dương cho đơn thường, âm cho đơn hoàn tiền) — dùng abs để đúng cả 2 chiều
+            if (abs((float) $order->paid_amount) > 0.001) {
+                throw ValidationException::withMessages(['status' => ['Không thể đảo về nháp: đơn đã có thanh toán. Vui lòng xóa phiếu thu/chi liên quan trước.']]);
+            }
+
+            if ($order->items->contains(fn ($i) => $i->is_return)) {
+                throw ValidationException::withMessages(['status' => ['Không thể đảo về nháp: đơn đã có hàng hoàn trả.']]);
+            }
+
+            // 1. Đảo tồn kho
+            $transactions = InventoryTransaction::where('reference_type', SalesOrder::class)
+                ->where('reference_id', $order->id)
+                ->with('items')
+                ->get();
+
+            foreach ($transactions as $transaction) {
+                foreach ($transaction->items as $txItem) {
+                    $currentAvgCost = (float) Inventory::where([
+                        'product_id' => $txItem->product_id,
+                        'warehouse_id' => $transaction->warehouse_id,
+                        'organization_id' => app('orgId'),
+                    ])->value('avg_cost');
+
+                    $this->inventoryTransactionService->updateInventoryBalance(
+                        $transaction->warehouse_id,
+                        $txItem->product_id,
+                        -(float) $txItem->quantity,
+                        $currentAvgCost,
+                    );
+                }
+                $transaction->items()->delete();
+                $transaction->delete();
+            }
+
+            // 2. Xóa bút toán
+            $journals = JournalEntry::where('reference_type', SalesOrder::class)
+                ->where('reference_id', $order->id)
+                ->get();
+
+            foreach ($journals as $journal) {
+                $journal->lines()->delete();
+                $journal->delete();
+            }
+
+            // 3. Đặt lại giữ chỗ tồn kho cho đơn nháp
+            $this->reserveStock($order);
+
+            // 4. Trở về nháp
+            $order->update([
+                'status' => OrderStatus::Draft,
+                'payment_status' => PaymentStatus::Unpaid,
+                'paid_amount' => 0,
+            ]);
+
+            return $order->fresh(['company', 'items.product']);
         });
     }
 
@@ -444,6 +545,20 @@ class SalesOrderService
 
     private function releaseReservation(SalesOrder $order): void
     {
+        $this->adjustReservation($order, -1);
+    }
+
+    private function reserveStock(SalesOrder $order): void
+    {
+        $this->adjustReservation($order, 1);
+    }
+
+    /**
+     * Tăng/giảm reserved_quantity theo từng item (và nguyên liệu nếu có công thức).
+     * $sign = 1 để giữ chỗ, -1 để giải phóng.
+     */
+    private function adjustReservation(SalesOrder $order, int $sign): void
+    {
         $orgId = app('orgId');
 
         $productIds = $order->items->pluck('product_id')->unique()->all();
@@ -459,18 +574,20 @@ class SalesOrderService
                 $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
                 foreach ($recipe->ingredients as $ingredient) {
                     $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                    Inventory::ensureExists($ingredient->ingredient_id, $item->warehouse_id, $orgId);
                     Inventory::where([
                         'product_id' => $ingredient->ingredient_id,
                         'warehouse_id' => $item->warehouse_id,
                         'organization_id' => $orgId,
-                    ])->decrement('reserved_quantity', $ingQty);
+                    ])->increment('reserved_quantity', $sign * $ingQty);
                 }
             } else {
+                Inventory::ensureExists($item->product_id, $item->warehouse_id, $orgId);
                 Inventory::where([
                     'product_id' => $item->product_id,
                     'warehouse_id' => $item->warehouse_id,
                     'organization_id' => $orgId,
-                ])->decrement('reserved_quantity', (float) $item->quantity);
+                ])->increment('reserved_quantity', $sign * (float) $item->quantity);
             }
         }
     }

@@ -7,6 +7,8 @@ use App\Models\Company;
 use App\Models\Inventory;
 use App\Models\Product;
 use App\Models\Warehouse;
+use App\Services\DefaultAccountsService;
+use Database\Seeders\SystemAccountsSeeder;
 use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
 
@@ -46,6 +48,10 @@ class SalesOrderTest extends TestCase
             'reserved_quantity' => 0,
             'min_quantity' => 0,
         ]);
+
+        // Hệ thống tài khoản kế toán chuẩn (cần cho bút toán khi xác nhận đơn)
+        $this->seed(SystemAccountsSeeder::class);
+        app(DefaultAccountsService::class)->seedForOrganization($this->organization->id);
     }
 
     private function validPayload(array $override = []): array
@@ -174,5 +180,30 @@ class SalesOrderTest extends TestCase
         $this->getJson('/api/v1/sales')
             ->assertOk()
             ->assertJsonStructure(['data' => [['id', 'order_number', 'status', 'total_amount']]]);
+    }
+
+    #[TestDox('Xác nhận hàng loạt theo mã vận đơn: nháp được xác nhận, trạng thái khác bỏ qua, mã sai báo không tìm thấy')]
+    public function test_bulk_confirm_by_code(): void
+    {
+        // Đơn nháp + có mã vận đơn → sẽ được xác nhận
+        $draft = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        \DB::table('sales_orders')->where('id', $draft['id'])->update(['tracking_number' => 'VD-001']);
+
+        // Đơn đã ở trạng thái khác (completed) → bỏ qua
+        $other = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        \DB::table('sales_orders')->where('id', $other['id'])->update(['status' => 'completed', 'tracking_number' => 'VD-002']);
+
+        $response = $this->postJson('/api/v1/sales/bulk-confirm-by-code', [
+            'codes' => ['VD-001', 'VD-002', 'KHONG-TON-TAI'],
+        ])->assertOk();
+
+        $response->assertJsonPath('summary.confirmed', 1)
+            ->assertJsonPath('summary.skipped', 1)
+            ->assertJsonPath('summary.not_found', 1);
+
+        $this->assertDatabaseHas('sales_orders', [
+            'id' => $draft['id'],
+            'status' => 'confirmed',
+        ]);
     }
 }

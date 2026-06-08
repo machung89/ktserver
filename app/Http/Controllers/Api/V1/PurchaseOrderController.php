@@ -34,7 +34,7 @@ class PurchaseOrderController extends Controller
     public function suggest(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'days' => ['nullable', 'integer', 'min:1', 'max:365'],
+            'days' => ['nullable', 'integer', 'min:0', 'max:365'],
             'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
         ]);
 
@@ -55,37 +55,39 @@ class PurchaseOrderController extends Controller
             ->selectRaw('soi.product_id, SUM(soi.quantity) as sold')
             ->pluck('sold', 'soi.product_id');
 
-        if ($soldMap->isEmpty()) {
-            return response()->json(['data' => []]);
-        }
-
-        $productIds = $soldMap->keys()->all();
-
-        // Tồn khả dụng (theo kho chọn, hoặc tổng tất cả kho)
+        // Tồn khả dụng theo SP (theo kho chọn, hoặc tổng tất cả kho)
         $stockMap = DB::table('inventories')
             ->where('organization_id', $orgId)
-            ->whereIn('product_id', $productIds)
             ->when($warehouseId, fn ($q, $v) => $q->where('warehouse_id', $v))
             ->groupBy('product_id')
             ->selectRaw('product_id, SUM(quantity - reserved_quantity) as available')
             ->pluck('available', 'product_id');
 
-        $products = Product::whereIn('id', $productIds)->where('is_active', true)->get()->keyBy('id');
+        // Ứng viên: SP có bán trong 30 ngày HOẶC SP đang âm kho (để bù về 0)
+        $candidateIds = $soldMap->keys()
+            ->merge($stockMap->filter(fn ($a) => (float) $a < 0)->keys())
+            ->unique()
+            ->values();
+
+        if ($candidateIds->isEmpty()) {
+            return response()->json(['data' => []]);
+        }
+
+        $products = Product::whereIn('id', $candidateIds->all())->where('is_active', true)->get()->keyBy('id');
 
         $items = [];
-        foreach ($soldMap as $pid => $sold) {
+        foreach ($candidateIds as $pid) {
             $product = $products->get($pid);
             if (! $product) {
                 continue;
             }
 
-            $velocity = (float) $sold / $window;
-            if ($velocity <= 0) {
-                continue;
-            }
-
+            $velocity = (float) ($soldMap[$pid] ?? 0) / $window;
             $available = (float) ($stockMap[$pid] ?? 0);
-            $suggestQty = $velocity * $coverDays - $available; // cần nhập thêm để đủ N ngày
+
+            // Mục tiêu = đủ bán N ngày, đồng thời không để tồn âm.
+            // days=0: chỉ bù phần đang âm về 0.
+            $suggestQty = max($velocity * $coverDays, 0.0) - $available;
             if ($suggestQty < 0.001) {
                 continue;
             }
@@ -97,14 +99,14 @@ class PurchaseOrderController extends Controller
                 'unit' => $product->unit,
                 'velocity' => round($velocity, 2),
                 'available' => round($available, 2),
-                'days_of_cover' => round($available / $velocity, 1),
+                'days_of_cover' => $velocity > 0 ? round($available / $velocity, 1) : null,
                 'suggest_qty' => (float) ceil($suggestQty),
                 'cost_price' => (float) ($product->cost_price ?? 0),
             ];
         }
 
-        // Ưu tiên SP còn ít ngày bán nhất lên đầu
-        usort($items, fn ($a, $b) => $a['days_of_cover'] <=> $b['days_of_cover']);
+        // Ưu tiên SP còn ít ngày bán nhất (tồn âm lên đầu) lên đầu
+        usort($items, fn ($a, $b) => ($a['days_of_cover'] ?? -INF) <=> ($b['days_of_cover'] ?? -INF));
 
         return response()->json(['data' => $items]);
     }

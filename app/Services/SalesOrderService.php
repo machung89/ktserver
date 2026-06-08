@@ -568,6 +568,11 @@ class SalesOrderService
             ->keyBy('product_id');
 
         foreach ($order->items as $item) {
+            // Item trả hàng (số lượng âm) là nhập lại kho, không giữ chỗ tồn.
+            if ($item->is_return || (float) $item->quantity <= 0) {
+                continue;
+            }
+
             $recipe = $recipes->get($item->product_id);
 
             if ($recipe) {

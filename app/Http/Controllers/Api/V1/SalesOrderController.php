@@ -24,6 +24,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class SalesOrderController extends Controller
@@ -45,6 +46,7 @@ class SalesOrderController extends Controller
         $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable', 'returnOrder'])
             ->withExists('warehouseExports')
             ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
+            ->when($request->created_by, fn ($q, $v) => $q->where('created_by', $v))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->search, function ($q, $v) {
@@ -111,6 +113,7 @@ class SalesOrderController extends Controller
             'discount_value' => ['nullable', 'numeric', 'min:0'],
             'promotion_id' => ['nullable', 'integer', 'exists:promotions,id'],
             'original_order_id' => ['nullable', 'exists:sales_orders,id'],
+            'created_by' => ['nullable', 'integer', Rule::exists('users', 'id')->where('organization_id', $this->orgId())],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.warehouse_id' => ['required', 'exists:warehouses,id'],
@@ -126,6 +129,13 @@ class SalesOrderController extends Controller
         $org = Organization::find($orgId);
         $allowNegativeStock = $org->setting('allow_negative_stock', false);
         $stockErrors = [];
+
+        // Chỉ người có quyền xem tất cả mới được chỉ định người tạo khác; còn lại mặc định là chính họ.
+        /** @var User $user */
+        $user = Auth::user();
+        $createdBy = ($user->hasPermission('sales.view_all') && ! empty($validated['created_by']))
+            ? (int) $validated['created_by']
+            : Auth::id();
 
         // Kiểm tra khuyến mại còn hiệu lực
         if (! empty($validated['promotion_id'])) {
@@ -143,7 +153,7 @@ class SalesOrderController extends Controller
         }
 
         try {
-            $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, $isReturnOrder, &$stockErrors) {
+            $order = DB::transaction(function () use ($validated, $orgId, $allowNegativeStock, $isReturnOrder, $createdBy, &$stockErrors) {
                 $itemProductIds = array_unique(array_column($validated['items'], 'product_id'));
                 $recipes = Recipe::with('ingredients')
                     ->whereIn('product_id', $itemProductIds)
@@ -241,7 +251,7 @@ class SalesOrderController extends Controller
                     'tax_amount' => 0,
                     'discount_amount' => 0,
                     'total_amount' => 0,
-                    'created_by' => Auth::id(),
+                    'created_by' => $createdBy,
                 ]);
 
                 if (! empty($validated['restaurant_table_id'])) {
@@ -679,6 +689,83 @@ class SalesOrderController extends Controller
             'failed' => count($errors),
             'errors' => $errors,
         ]);
+    }
+
+    /**
+     * Xác nhận hàng loạt theo mã quét (QR/barcode): mã đơn, mã vận đơn hoặc mã tham chiếu.
+     * - Đơn nháp  → xác nhận.
+     * - Trạng thái khác → bỏ qua.
+     * - Không tìm thấy → báo về UI.
+     */
+    public function bulkConfirmByCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'codes' => ['required', 'array', 'min:1'],
+            'codes.*' => ['required', 'string'],
+        ]);
+
+        $codes = collect($validated['codes'])->map(fn ($c) => trim($c))->filter()->unique()->values();
+
+        $results = [];
+        $summary = ['confirmed' => 0, 'skipped' => 0, 'not_found' => 0, 'error' => 0];
+
+        // Quét mã để xác nhận là thao tác vận hành (giao/đóng hàng): chỉ cần quyền
+        // sales.confirm, KHÔNG giới hạn theo người tạo (giống endpoint confirm đơn lẻ).
+        // Lọc organization_id tường minh để tuyệt đối không khớp nhầm đơn của org khác.
+        $orgId = $this->orgId();
+
+        foreach ($codes as $code) {
+            $order = SalesOrder::where('organization_id', $orgId)
+                ->where(function ($q) use ($code) {
+                    $q->where('order_number', $code)
+                        ->orWhere('tracking_number', $code)
+                        ->orWhere('ref_id', $code);
+                })
+                ->first();
+
+            if (! $order) {
+                $summary['not_found']++;
+                $results[] = ['code' => $code, 'status' => 'not_found'];
+
+                continue;
+            }
+
+            if ($order->status !== OrderStatus::Draft) {
+                $summary['skipped']++;
+                $results[] = [
+                    'code' => $code,
+                    'status' => 'skipped',
+                    'order_number' => $order->order_number,
+                    'current_status' => $order->status->value,
+                ];
+
+                continue;
+            }
+
+            try {
+                $this->salesOrderService->confirm($order);
+                $summary['confirmed']++;
+                $results[] = ['code' => $code, 'status' => 'confirmed', 'order_number' => $order->order_number];
+            } catch (ValidationException $e) {
+                $summary['error']++;
+                $results[] = [
+                    'code' => $code,
+                    'status' => 'error',
+                    'order_number' => $order->order_number,
+                    'reason' => collect($e->errors())->flatten()->first(),
+                ];
+            } catch (\Throwable) {
+                $summary['error']++;
+                $results[] = [
+                    'code' => $code,
+                    'status' => 'error',
+                    'order_number' => $order->order_number,
+                    'reason' => 'Lỗi hệ thống',
+                ];
+            }
+        }
+
+        return response()->json(['summary' => $summary, 'results' => $results]);
     }
 
     public function bulkImport(Request $request): JsonResponse

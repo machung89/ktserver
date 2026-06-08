@@ -79,11 +79,27 @@ class ShopeeImportController extends Controller
         $updated = 0;
         $failed = 0;
         $cancelled = 0;
+        $pending = 0;
+        $noTracking = 0;
         $errors = [];
 
         foreach ($groupedByOrder as $orderId => $orderRows) {
             $firstRow = $orderRows->first();
             $mappedStatus = $this->resolveStatus($firstRow['status'] ?? '');
+
+            // Đơn "Chờ xác nhận" → bỏ qua hoàn toàn (kể cả đơn đã tồn tại)
+            if ($mappedStatus === null) {
+                $pending++;
+
+                continue;
+            }
+
+            // Chưa có mã vận đơn (chưa lấy hàng) → bỏ qua
+            if (trim($firstRow['tracking_number'] ?? '') === '') {
+                $noTracking++;
+
+                continue;
+            }
 
             // If order already exists by ref_id → confirm if transitioning from Draft, then update status
             $existingOrder = SalesOrder::where('ref_id', (string) $orderId)->first();
@@ -268,6 +284,8 @@ class ShopeeImportController extends Controller
             'updated' => $updated,
             'failed' => $failed,
             'cancelled' => $cancelled,
+            'pending' => $pending,
+            'no_tracking' => $noTracking,
             'errors' => $errors,
         ]);
     }
@@ -283,9 +301,18 @@ class ShopeeImportController extends Controller
         };
     }
 
-    private function resolveStatus(string $statusText): OrderStatus
+    /**
+     * Map trạng thái Shopee → trạng thái đơn nội bộ.
+     * Trả null nếu đơn "Chờ xác nhận" (chưa được xác nhận) → bỏ qua, không import.
+     */
+    private function resolveStatus(string $statusText): ?OrderStatus
     {
         $lower = mb_strtolower(trim($statusText));
+
+        // "Chờ xác nhận" chứa chữ "xác nhận" nên phải chặn trước nhánh Confirmed
+        if (str_contains($lower, 'chờ xác nhận')) {
+            return null;
+        }
 
         if (str_contains($lower, 'hủy')) {
             return OrderStatus::Cancelled;

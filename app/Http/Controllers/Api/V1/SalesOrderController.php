@@ -331,7 +331,8 @@ class SalesOrderController extends Controller
                     'discount_amount' => $orderDiscountAmount,
                     'total_amount' => $totalAmount,
                     'standard_total' => $standardTotal,
-                    'employee_profit' => $standardTotal > 0 ? $totalAmount - $standardTotal : 0,
+                    // Đơn trả hàng có standard_total âm → vẫn tính (đảo ngược lời/lỗ đơn gốc)
+                    'employee_profit' => abs($standardTotal) > 0.001 ? $totalAmount - $standardTotal : 0,
                 ]);
 
                 return $order;
@@ -517,8 +518,9 @@ class SalesOrderController extends Controller
                 'tax_amount' => $taxAmount,
                 'discount_amount' => $orderDiscountAmount,
                 'total_amount' => $totalAmount,
-                'standard_total' => $standardTotal > 0 ? $standardTotal : 0,
-                'employee_profit' => $standardTotal > 0 ? $totalAmount - $standardTotal : 0,
+                'standard_total' => $standardTotal,
+                // Đơn trả hàng có standard_total âm → vẫn tính (đảo ngược lời/lỗ đơn gốc)
+                'employee_profit' => abs($standardTotal) > 0.001 ? $totalAmount - $standardTotal : 0,
             ]);
         });
 
@@ -534,57 +536,17 @@ class SalesOrderController extends Controller
 
     public function confirm(SalesOrder $salesOrder): SalesOrderResource
     {
-        if ($salesOrder->status !== OrderStatus::Draft) {
-            throw ValidationException::withMessages(['status' => ['Chỉ có thể xác nhận đơn ở trạng thái nháp.']]);
-        }
-
-        $result = $this->salesOrderService->confirm($salesOrder);
-
-        $this->activityLog->log(
-            $this->orgId(), Auth::id(),
-            'sales_order_confirmed',
-            "Xác nhận đơn bán {$result->order_number}",
-            null, [], 'sales_order', $result->id
-        );
-
-        return new SalesOrderResource($result);
+        return new SalesOrderResource($this->salesOrderService->confirm($salesOrder));
     }
 
     public function ship(SalesOrder $salesOrder): SalesOrderResource
     {
-        if ($salesOrder->status !== OrderStatus::Confirmed) {
-            throw ValidationException::withMessages(['status' => ['Chỉ có thể giao đơn ở trạng thái đã xác nhận.']]);
-        }
-
-        $salesOrder->update(['status' => OrderStatus::Shipping]);
-
-        $this->activityLog->log(
-            $this->orgId(), Auth::id(),
-            'sales_order_shipped',
-            "Chuyển đơn bán {$salesOrder->order_number} sang đang giao",
-            null, [], 'sales_order', $salesOrder->id
-        );
-
-        return new SalesOrderResource($salesOrder->fresh());
+        return new SalesOrderResource($this->salesOrderService->ship($salesOrder));
     }
 
     public function complete(SalesOrder $salesOrder): SalesOrderResource
     {
-        if (! in_array($salesOrder->status, [OrderStatus::Confirmed, OrderStatus::Shipping])) {
-            throw ValidationException::withMessages(['status' => ['Chỉ có thể hoàn thành đơn ở trạng thái đã xác nhận hoặc đang giao.']]);
-        }
-
-        $salesOrder->update(['status' => OrderStatus::Completed]);
-        $this->releaseTableIfIdle($salesOrder);
-
-        $this->activityLog->log(
-            $this->orgId(), Auth::id(),
-            'sales_order_completed',
-            "Hoàn thành đơn bán {$salesOrder->order_number}",
-            null, [], 'sales_order', $salesOrder->id
-        );
-
-        return new SalesOrderResource($salesOrder->fresh());
+        return new SalesOrderResource($this->salesOrderService->complete($salesOrder));
     }
 
     public function returnItems(Request $request, SalesOrder $salesOrder): SalesOrderResource
@@ -607,48 +569,14 @@ class SalesOrderController extends Controller
             throw ValidationException::withMessages(['status' => ['Không thể hủy đơn đã hoàn thành.']]);
         }
 
-        $result = $this->salesOrderService->cancel($salesOrder);
-        $this->releaseTableIfIdle($salesOrder);
-
-        $this->activityLog->log(
-            $this->orgId(), Auth::id(),
-            'sales_order_cancelled',
-            "Hủy đơn bán {$salesOrder->order_number}",
-            null, [], 'sales_order', $salesOrder->id
-        );
-
-        return new SalesOrderResource($result);
+        return new SalesOrderResource($this->salesOrderService->cancel($salesOrder));
     }
 
     public function revertToDraft(SalesOrder $salesOrder): SalesOrderResource
     {
         $result = $this->salesOrderService->revertToDraft($salesOrder);
 
-        $this->activityLog->log(
-            $this->orgId(), Auth::id(),
-            'sales_order_reverted',
-            "Đảo đơn bán {$salesOrder->order_number} về nháp — đã hủy bút toán và tồn kho",
-            null, [], 'sales_order', $salesOrder->id
-        );
-
         return new SalesOrderResource($result->load(['company', 'createdBy', 'items.product']));
-    }
-
-    private function releaseTableIfIdle(SalesOrder $order): void
-    {
-        if (! $order->restaurant_table_id) {
-            return;
-        }
-
-        $hasActive = SalesOrder::where('restaurant_table_id', $order->restaurant_table_id)
-            ->where('id', '!=', $order->id)
-            ->whereNotIn('status', [OrderStatus::Completed, OrderStatus::Cancelled])
-            ->exists();
-
-        if (! $hasActive) {
-            RestaurantTable::where('id', $order->restaurant_table_id)
-                ->update(['status' => 'available']);
-        }
     }
 
     public function bulkConfirm(Request $request): JsonResponse

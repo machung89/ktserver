@@ -136,6 +136,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         });
         Route::post('warehouse-exports', [WarehouseExportController::class, 'store'])->middleware('permission:warehouse_exports.create');
         Route::put('warehouse-exports/{warehouseExport}', [WarehouseExportController::class, 'update'])->middleware('permission:warehouse_exports.edit');
+        Route::post('warehouse-exports/{warehouseExport}/bulk-status', [WarehouseExportController::class, 'bulkStatus'])->middleware('permission:warehouse_exports.edit');
         Route::delete('warehouse-exports/{warehouseExport}', [WarehouseExportController::class, 'destroy'])->middleware('permission:warehouse_exports.delete');
 
         // Danh mục — Đối tác

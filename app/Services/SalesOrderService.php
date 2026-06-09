@@ -10,7 +10,9 @@ use App\Models\InventoryTransaction;
 use App\Models\JournalEntry;
 use App\Models\Organization;
 use App\Models\Recipe;
+use App\Models\RestaurantTable;
 use App\Models\SalesOrder;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -19,7 +21,43 @@ class SalesOrderService
     public function __construct(
         protected JournalEntryService $journalEntryService,
         protected InventoryTransactionService $inventoryTransactionService,
+        protected ActivityLogService $activityLog,
     ) {}
+
+    /**
+     * Ghi nhật ký chuyển trạng thái đơn (dùng chung cho mọi đường: đơn lẻ, hàng loạt, phiếu xuất).
+     */
+    private function logStatus(SalesOrder $order, string $action, string $description): void
+    {
+        if (! Auth::id()) {
+            return;
+        }
+
+        $this->activityLog->log(
+            app('orgId'), Auth::id(), $action, $description,
+            null, [], 'sales_order', $order->id
+        );
+    }
+
+    /**
+     * Giải phóng bàn nếu không còn đơn nào đang hoạt động trên bàn đó.
+     */
+    private function releaseTableIfIdle(SalesOrder $order): void
+    {
+        if (! $order->restaurant_table_id) {
+            return;
+        }
+
+        $hasActive = SalesOrder::where('restaurant_table_id', $order->restaurant_table_id)
+            ->where('id', '!=', $order->id)
+            ->whereNotIn('status', [OrderStatus::Completed, OrderStatus::Cancelled])
+            ->exists();
+
+        if (! $hasActive) {
+            RestaurantTable::where('id', $order->restaurant_table_id)
+                ->update(['status' => 'available']);
+        }
+    }
 
     public function confirm(SalesOrder $order): SalesOrder
     {
@@ -202,8 +240,41 @@ class SalesOrderService
                 lines: $lines,
             );
 
+            $this->logStatus($order, 'sales_order_confirmed', "Xác nhận đơn bán {$order->order_number}");
+
             return $order->fresh(['company', 'items.product']);
         });
+    }
+
+    /**
+     * Chuyển đơn đã xác nhận sang đang giao.
+     */
+    public function ship(SalesOrder $order): SalesOrder
+    {
+        if ($order->status !== OrderStatus::Confirmed) {
+            throw ValidationException::withMessages(['status' => ['Chỉ có thể giao đơn ở trạng thái đã xác nhận.']]);
+        }
+
+        $order->update(['status' => OrderStatus::Shipping]);
+        $this->logStatus($order, 'sales_order_shipped', "Chuyển đơn bán {$order->order_number} sang đang giao");
+
+        return $order->fresh();
+    }
+
+    /**
+     * Hoàn thành đơn (từ đã xác nhận hoặc đang giao).
+     */
+    public function complete(SalesOrder $order): SalesOrder
+    {
+        if (! in_array($order->status, [OrderStatus::Confirmed, OrderStatus::Shipping])) {
+            throw ValidationException::withMessages(['status' => ['Chỉ có thể hoàn thành đơn ở trạng thái đã xác nhận hoặc đang giao.']]);
+        }
+
+        $order->update(['status' => OrderStatus::Completed]);
+        $this->releaseTableIfIdle($order);
+        $this->logStatus($order, 'sales_order_completed', "Hoàn thành đơn bán {$order->order_number}");
+
+        return $order->fresh();
     }
 
     /**
@@ -413,6 +484,8 @@ class SalesOrderService
                 'paid_amount' => 0,
             ]);
 
+            $this->logStatus($order, 'sales_order_reverted', "Đảo đơn bán {$order->order_number} về nháp — đã hủy bút toán và tồn kho");
+
             return $order->fresh(['company', 'items.product']);
         });
     }
@@ -468,6 +541,8 @@ class SalesOrderService
             }
 
             $order->update(['status' => OrderStatus::Cancelled]);
+            $this->releaseTableIfIdle($order);
+            $this->logStatus($order, 'sales_order_cancelled', "Hủy đơn bán {$order->order_number}");
 
             return $order;
         });

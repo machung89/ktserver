@@ -2,19 +2,41 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\OrderStatus;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\WarehouseExportResource;
 use App\Models\SalesOrder;
 use App\Models\WarehouseExport;
+use App\Services\ActivityLogService;
+use App\Services\SalesOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class WarehouseExportController extends Controller
 {
     use ScopedByOrganization;
+
+    private const STATUS_LABELS = [
+        'confirmed' => 'Xác nhận',
+        'shipping' => 'Giao hàng',
+        'completed' => 'Hoàn thành',
+    ];
+
+    private const STATUS_LEVEL = [
+        'draft' => 0,
+        'confirmed' => 1,
+        'shipping' => 2,
+        'completed' => 3,
+    ];
+
+    public function __construct(
+        private ActivityLogService $activityLog,
+        private SalesOrderService $salesOrderService,
+    ) {}
 
     public function index(Request $request): AnonymousResourceCollection
     {
@@ -56,6 +78,14 @@ class WarehouseExportController extends Controller
             $export->salesOrders()->sync($validated['order_ids']);
         }
 
+        $orderCount = count($validated['order_ids'] ?? []);
+        $this->activityLog->log(
+            $this->orgId(), $request->user()->id,
+            'warehouse_export_created',
+            "Tạo phiếu xuất kho {$export->export_number}".($orderCount ? " với {$orderCount} đơn" : ''),
+            null, [], 'warehouse_export', $export->id
+        );
+
         return (new WarehouseExportResource($export->load(['warehouse', 'salesOrders.company'])))
             ->response()->setStatusCode(201);
     }
@@ -78,6 +108,9 @@ class WarehouseExportController extends Controller
             'order_ids.*' => ['integer', 'exists:sales_orders,id'],
         ]);
 
+        $oldStatus = $warehouseExport->status;
+        $oldCount = $warehouseExport->salesOrders()->count();
+
         $warehouseExport->update(collect($validated)->except('order_ids')->toArray());
 
         if ($request->has('order_ids')) {
@@ -93,7 +126,105 @@ class WarehouseExportController extends Controller
             }
         }
 
+        $changes = [];
+        if (array_key_exists('status', $validated) && $validated['status'] !== $oldStatus) {
+            $from = self::STATUS_LABELS[$oldStatus] ?? $oldStatus;
+            $to = self::STATUS_LABELS[$validated['status']] ?? $validated['status'];
+            $changes[] = "trạng thái {$from} → {$to}";
+        }
+        if ($request->has('order_ids')) {
+            $newCount = count($validated['order_ids'] ?? []);
+            if ($newCount !== $oldCount) {
+                $changes[] = "số đơn {$oldCount} → {$newCount}";
+            }
+        }
+
+        if (! empty($changes)) {
+            $this->activityLog->log(
+                $this->orgId(), $request->user()->id,
+                'warehouse_export_updated',
+                "Cập nhật phiếu xuất {$warehouseExport->export_number}: ".implode(', ', $changes),
+                null, [], 'warehouse_export', $warehouseExport->id
+            );
+        }
+
         return new WarehouseExportResource($warehouseExport->load(['warehouse', 'salesOrders.company']));
+    }
+
+    /**
+     * Đổi trạng thái hàng loạt: đưa mọi đơn trong phiếu lên trạng thái đích
+     * (nháp → xác nhận → [giao] → hoàn thành) trong một request, rồi cập nhật phiếu.
+     */
+    public function bulkStatus(Request $request, WarehouseExport $warehouseExport): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => ['required', Rule::in(['confirmed', 'shipping', 'completed'])],
+        ]);
+        $target = $validated['status'];
+        $targetLevel = self::STATUS_LEVEL[$target];
+
+        $orders = $warehouseExport->salesOrders()->get();
+        $updated = 0;
+        $failed = [];
+
+        foreach ($orders as $order) {
+            $current = $order->getRawOriginal('status');
+            if ($current === 'cancelled' || (self::STATUS_LEVEL[$current] ?? 0) >= $targetLevel) {
+                continue;
+            }
+
+            try {
+                $this->advanceOrderTo($order, $target);
+                $updated++;
+            } catch (ValidationException $e) {
+                $failed[] = $order->order_number;
+            } catch (\Throwable) {
+                $failed[] = $order->order_number;
+            }
+        }
+
+        $warehouseExport->update(['status' => $target]);
+
+        $this->activityLog->log(
+            $this->orgId(), $request->user()->id,
+            'warehouse_export_updated',
+            "Đổi trạng thái phiếu xuất {$warehouseExport->export_number} → ".(self::STATUS_LABELS[$target] ?? $target)
+                ." ({$updated} đơn".(count($failed) ? ', '.count($failed).' đơn lỗi' : '').')',
+            null, [], 'warehouse_export', $warehouseExport->id
+        );
+
+        return response()->json([
+            'data' => new WarehouseExportResource($warehouseExport->load(['warehouse', 'salesOrders.company', 'salesOrders.items.product'])),
+            'updated' => $updated,
+            'failed' => $failed,
+        ]);
+    }
+
+    /**
+     * Đưa 1 đơn lần lượt qua các bước cho tới trạng thái đích.
+     */
+    private function advanceOrderTo(SalesOrder $order, string $target): void
+    {
+        if ($order->status === OrderStatus::Draft) {
+            $this->salesOrderService->confirm($order);
+            $order->refresh();
+        }
+
+        if ($target === 'confirmed') {
+            return;
+        }
+
+        if ($target === 'shipping') {
+            if ($order->status === OrderStatus::Confirmed) {
+                $this->salesOrderService->ship($order);
+            }
+
+            return;
+        }
+
+        if ($target === 'completed') {
+            $this->salesOrderService->complete($order);
+        }
     }
 
     public function destroy(WarehouseExport $warehouseExport): JsonResponse

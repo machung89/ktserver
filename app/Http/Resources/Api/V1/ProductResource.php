@@ -15,7 +15,8 @@ class ProductResource extends JsonResource
             'barcode' => $this->barcode,
             'name' => $this->name,
             'description' => $this->description,
-            'image_url' => $this->image_path ? asset('storage/'.$this->image_path) : null,
+            // URL tương đối để cùng origin với frontend (đi qua proxy /storage), tránh phụ thuộc host/port backend
+            'image_url' => $this->image_path ? '/storage/'.$this->image_path : null,
             'unit' => $this->unit,
             'category_id' => $this->category_id,
             'category' => new ProductCategoryResource($this->whenLoaded('category')),

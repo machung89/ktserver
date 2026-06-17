@@ -286,6 +286,28 @@ class SalesOrderTest extends TestCase
         $this->assertEquals((float) $sums->d, (float) $sums->c, 'Tổng Nợ = Tổng Có');
     }
 
+    #[TestDox('Xác nhận đơn có tổng tiền lẻ (nguồn import chưa làm tròn) vẫn tạo bút toán cân')]
+    public function test_confirm_with_fractional_total_keeps_journal_balanced(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+
+        // Mô phỏng dữ liệu nguồn (Shopee/Tiktok cũ) chưa làm tròn: tổng tiền có phần lẻ .5
+        \DB::table('sales_orders')->where('id', $order['id'])->update([
+            'subtotal' => 89077.5,
+            'total_amount' => 89077.5,
+            'tax_amount' => 0,
+        ]);
+
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        $sums = \DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->where('j.reference_type', SalesOrder::class)->where('j.reference_id', $order['id'])
+            ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
+
+        $this->assertEquals((float) $sums->d, (float) $sums->c, 'Tổng Nợ = Tổng Có dù tổng tiền có phần lẻ');
+    }
+
     #[TestDox('Báo cáo doanh thu theo SP khớp với tổng đơn (phân bổ chiết khấu cấp đơn)')]
     public function test_product_revenue_report_reconciles_with_order_total(): void
     {

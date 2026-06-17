@@ -229,30 +229,34 @@ class SalesOrderService
 
             $totalCost = round($order->items->sum(fn ($item) => $item->quantity * $item->cost_price));
 
+            // VND: làm tròn về đồng nguyên tại đây để bút toán luôn cân, kể cả khi total/tax bị lẻ
+            // (dữ liệu cũ hoặc nguồn import chưa làm tròn). 131 = 511 + 33311 tuyệt đối.
+            $receivable = round((float) $order->total_amount);
+            $vat = round((float) $order->tax_amount);
+            $netRevenue = $receivable - $vat;
+
             // Bút toán: Nợ 131 / Có 511 + Nợ 632 / Có 156
             $lines = [
                 [
                     'account_code' => '131',
                     'description' => "Phải thu KH - {$order->order_number}",
-                    'debit' => (float) $order->total_amount,
+                    'debit' => $receivable,
                     'credit' => 0,
                 ],
                 [
                     'account_code' => '511',
                     'description' => "Doanh thu bán hàng - {$order->order_number}",
                     'debit' => 0,
-                    // Doanh thu thuần = tổng phải thu − thuế (lấy từ total_amount để luôn cân với 131,
-                    // mọi giá trị tiền là đồng nguyên nên không phát sinh lệch làm tròn)
-                    'credit' => round((float) $order->total_amount - (float) $order->tax_amount),
+                    'credit' => $netRevenue,
                 ],
             ];
 
-            if ((float) $order->tax_amount > 0) {
+            if ($vat > 0) {
                 $lines[] = [
                     'account_code' => '33311',
                     'description' => "Thuế GTGT đầu ra - {$order->order_number}",
                     'debit' => 0,
-                    'credit' => (float) $order->tax_amount,
+                    'credit' => $vat,
                 ];
             }
 

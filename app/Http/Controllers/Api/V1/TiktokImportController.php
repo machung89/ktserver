@@ -202,11 +202,11 @@ class TiktokImportController extends Controller
                         $base = (float) $item['quantity'] * (float) $item['unit_price'];
                         $discountPct = (float) ($item['discount_pct'] ?? 0);
                         $discountAmount = $base * $discountPct / 100;
-                        $amount = $base - $discountAmount;
+                        $amount = round($base - $discountAmount); // VND: làm tròn về đồng nguyên
                         $subtotal += $amount;
                         $stdPrice = (float) ($item['standard_price'] ?? 0);
                         if ($stdPrice > 0) {
-                            $standardTotal += (float) $item['quantity'] * $stdPrice;
+                            $standardTotal += round((float) $item['quantity'] * $stdPrice);
                         }
 
                         $order->items()->create([

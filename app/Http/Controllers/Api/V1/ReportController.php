@@ -116,7 +116,7 @@ class ReportController extends Controller
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->whereBetween('so.order_date', [$yearStart, $yearEnd])
             ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
-            ->selectRaw('COALESCE(SUM(soi.amount * (1 + soi.tax_rate / 100)), 0) as revenue, COALESCE(SUM(soi.quantity * soi.cost_price), 0) as cost')
+            ->selectRaw('COALESCE(SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))), 0) as revenue, COALESCE(SUM(soi.quantity * soi.cost_price), 0) as cost')
             ->first();
 
         $yearRevenue = (float) ($yearAgg->revenue ?? 0);
@@ -158,7 +158,7 @@ class ReportController extends Controller
             ->where('soi.is_return', false)
             ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->groupBy('soi.product_id', 'p.code', 'p.name', 'p.unit')
-            ->selectRaw('p.code as product_code, p.name as product_name, p.unit, SUM(soi.quantity) as quantity, SUM(soi.amount) as revenue')
+            ->selectRaw('p.code as product_code, p.name as product_name, p.unit, SUM(soi.quantity) as quantity, SUM(soi.amount - soi.order_discount_alloc) as revenue')
             ->havingRaw('SUM(soi.quantity) > 0')
             ->orderByDesc('quantity')
             ->limit(10)
@@ -419,11 +419,11 @@ class ReportController extends Controller
                 'cat.name as cat_name',
                 'parent.name as parent_name',
                 DB::raw('SUM(soi.quantity) as quantity'),
-                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
             ->get();
 
         $grouped = $rows->map(function ($r) use ($showProfit) {
@@ -482,7 +482,7 @@ class ReportController extends Controller
             ->select([
                 DB::raw('DATE(so.order_date) as date'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
@@ -536,7 +536,7 @@ class ReportController extends Controller
             ->select([
                 DB::raw("DATE_FORMAT(so.order_date, '%Y-%m') as month"),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
@@ -593,11 +593,11 @@ class ReportController extends Controller
                 DB::raw("COALESCE(CASE WHEN parent_pc.name IS NOT NULL THEN CONCAT(parent_pc.name, ' › ', pc.name) ELSE pc.name END, '(Chưa phân loại)') as category_name"),
                 DB::raw('SUM(soi.quantity) as quantity'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
             ->get()
             ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);
@@ -656,7 +656,7 @@ class ReportController extends Controller
                 DB::raw('CASE WHEN parent_cat.name IS NOT NULL THEN CONCAT(parent_cat.name, \' › \', cat.name) ELSE cat.name END as category_name'),
                 DB::raw('SUM(soi.quantity) as quantity'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(soi.amount) as amount'),
+                DB::raw('SUM(soi.amount - soi.order_discount_alloc) as amount'),
             ])
             ->orderByDesc(DB::raw('SUM(soi.quantity)'))
             ->get()
@@ -1058,11 +1058,11 @@ class ReportController extends Controller
                 'u.department',
                 'u.position',
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100)) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(soi.amount * (1 + soi.tax_rate / 100))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
             ->get()
             ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);

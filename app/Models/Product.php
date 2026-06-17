@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 #[Fillable(['code', 'barcode', 'name', 'description', 'image_path', 'unit', 'category_id', 'price', 'standard_price', 'cost_price', 'is_active', 'product_type', 'organization_id'])]
 class Product extends Model
@@ -44,5 +45,13 @@ class Product extends Model
     public function inventories(): HasMany
     {
         return $this->hasMany(Inventory::class);
+    }
+
+    /**
+     * Định mức/Combo của sản phẩm (1 sản phẩm tối đa 1 recipe — unique product_id).
+     */
+    public function recipe(): HasOne
+    {
+        return $this->hasOne(Recipe::class);
     }
 }

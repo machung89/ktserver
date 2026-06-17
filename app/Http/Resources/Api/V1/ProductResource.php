@@ -29,6 +29,15 @@ class ProductResource extends JsonResource
                 'name' => $u->name,
                 'conversion_factor' => (float) $u->conversion_factor,
             ])),
+            'is_combo' => $this->whenLoaded('recipe', fn () => $this->recipe?->type === 'combo'),
+            'combo_components' => $this->whenLoaded('recipe', fn () => ($this->recipe && $this->recipe->type === 'combo' && $this->recipe->relationLoaded('ingredients'))
+                ? $this->recipe->ingredients->map(fn ($i) => [
+                    'product_id' => $i->ingredient_id,
+                    'name' => $i->ingredient?->name,
+                    'quantity' => (float) $i->quantity,
+                    'unit' => $i->unit ?? $i->ingredient?->unit,
+                ])->values()
+                : []),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

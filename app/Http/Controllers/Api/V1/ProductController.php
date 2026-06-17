@@ -31,7 +31,7 @@ class ProductController extends Controller
         $sortBy = in_array($request->sort_by, $sortable) ? $request->sort_by : 'created_at';
         $sortDir = $request->sort_dir === 'asc' ? 'asc' : 'desc';
 
-        $products = Product::with(['category.parent', 'units'])
+        $products = Product::with(['category.parent', 'units', 'recipe.ingredients.ingredient:id,name,unit,code'])
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('code', 'like', "%{$v}%"))
             ->when($request->category_id, fn ($q, $v) => $q->where('category_id', $v))
             ->when($request->boolean('active_only', false), fn ($q) => $q->where('is_active', true))
@@ -73,14 +73,19 @@ class ProductController extends Controller
             'units' => ['nullable', 'array'],
             'units.*.name' => ['required', 'string'],
             'units.*.conversion_factor' => ['required', 'numeric', 'min:0.0001'],
+            'combo_components' => ['nullable', 'array'],
+            'combo_components.*.product_id' => ['required', 'integer', 'exists:products,id'],
+            'combo_components.*.quantity' => ['required', 'numeric', 'min:0.0001'],
+            'combo_components.*.unit' => ['nullable', 'string', 'max:50'],
         ]);
 
         $product = Product::create(array_merge(
-            collect($validated)->except('units')->all(),
+            collect($validated)->except(['units', 'combo_components'])->all(),
             ['organization_id' => $this->orgId()]
         ));
 
         $this->syncUnits($product, $validated['units'] ?? []);
+        $this->syncCombo($product, $validated['combo_components'] ?? null);
 
         $this->activityLog->log(
             $this->orgId(), Auth::id(),
@@ -89,12 +94,45 @@ class ProductController extends Controller
             null, [], 'product', $product->id
         );
 
-        return (new ProductResource($product->load('units')))->response()->setStatusCode(201);
+        return (new ProductResource($product->load(['units', 'recipe.ingredients.ingredient:id,name,unit,code'])))->response()->setStatusCode(201);
+    }
+
+    /**
+     * Tạo/cập nhật/xóa combo (recipe type=combo) cho sản phẩm.
+     * - $components null  => không đụng tới (không gửi từ form).
+     * - $components rỗng  => xóa combo nếu có.
+     * - $components có    => upsert combo với các thành phần.
+     */
+    private function syncCombo(Product $product, ?array $components): void
+    {
+        if ($components === null) {
+            return;
+        }
+
+        if (empty($components)) {
+            $product->recipe()->where('type', 'combo')->delete();
+
+            return;
+        }
+
+        $recipe = $product->recipe()->firstOrNew([]);
+        $recipe->fill([
+            'organization_id' => $this->orgId(),
+            'type' => 'combo',
+            'yield_quantity' => 1,
+        ])->save();
+
+        $recipe->ingredients()->delete();
+        $recipe->ingredients()->createMany(collect($components)->map(fn ($c) => [
+            'ingredient_id' => $c['product_id'],
+            'quantity' => $c['quantity'],
+            'unit' => $c['unit'] ?? null,
+        ])->all());
     }
 
     public function show(Product $product): ProductResource
     {
-        return new ProductResource($product->load(['category.parent', 'units']));
+        return new ProductResource($product->load(['category.parent', 'units', 'recipe.ingredients.ingredient:id,name,unit,code']));
     }
 
     public function update(Request $request, Product $product): ProductResource
@@ -114,12 +152,20 @@ class ProductController extends Controller
             'units' => ['nullable', 'array'],
             'units.*.name' => ['required_with:units', 'string'],
             'units.*.conversion_factor' => ['required_with:units', 'numeric', 'min:0.0001'],
+            'combo_components' => ['nullable', 'array'],
+            'combo_components.*.product_id' => ['required', 'integer', 'exists:products,id'],
+            'combo_components.*.quantity' => ['required', 'numeric', 'min:0.0001'],
+            'combo_components.*.unit' => ['nullable', 'string', 'max:50'],
         ]);
 
-        $product->update(collect($validated)->except('units')->all());
+        $product->update(collect($validated)->except(['units', 'combo_components'])->all());
 
         if (array_key_exists('units', $validated)) {
             $this->syncUnits($product, $validated['units'] ?? []);
+        }
+
+        if (array_key_exists('combo_components', $validated)) {
+            $this->syncCombo($product, $validated['combo_components']);
         }
 
         $this->activityLog->log(
@@ -129,7 +175,7 @@ class ProductController extends Controller
             null, [], 'product', $product->id
         );
 
-        return new ProductResource($product->load(['category.parent', 'units']));
+        return new ProductResource($product->load(['category.parent', 'units', 'recipe.ingredients.ingredient:id,name,unit,code']));
     }
 
     public function destroy(Product $product): JsonResponse

@@ -275,10 +275,10 @@ class SalesOrderController extends Controller
                         'fixed' => min($discountValue, $base),
                         default => 0,
                     };
-                    $amount = $base - $discountAmount;
+                    $amount = round($base - $discountAmount); // VND: làm tròn về đồng nguyên
                     $taxRate = (float) ($item['tax_rate'] ?? 0);
                     $subtotal += $amount;
-                    $taxAmount += $amount * $taxRate / 100;
+                    $taxAmount += round($amount * $taxRate / 100);
                     $itemStandardPrice = (float) ($standardPrices[$item['product_id']] ?? 0);
                     if ($itemStandardPrice > 0) {
                         $standardTotal += (float) $item['quantity'] * $itemStandardPrice;
@@ -319,12 +319,13 @@ class SalesOrderController extends Controller
                 $orderDiscountType = $validated['discount_type'] ?? null;
                 $orderDiscountValue = (float) ($validated['discount_value'] ?? 0);
                 $orderDiscountAmount = match ($orderDiscountType) {
-                    'percent' => $subtotal * $orderDiscountValue / 100,
-                    'fixed' => min($orderDiscountValue, $subtotal),
+                    'percent' => round($subtotal * $orderDiscountValue / 100),
+                    'fixed' => min(round($orderDiscountValue), $subtotal),
                     default => 0,
                 };
 
                 $totalAmount = $subtotal + $taxAmount - $orderDiscountAmount;
+                $standardTotal = round($standardTotal);
                 $order->update([
                     'subtotal' => $subtotal,
                     'tax_amount' => $taxAmount,
@@ -367,7 +368,7 @@ class SalesOrderController extends Controller
             abort_unless(in_array($salesOrder->created_by, $viewableIds), 403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
-        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'returnOrder', 'originalOrder', 'promotion']));
+        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product.recipe.ingredients.ingredient:id,name,unit,code', 'items.warehouse', 'payments.account', 'returnOrder', 'originalOrder', 'promotion']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource
@@ -463,10 +464,10 @@ class SalesOrderController extends Controller
                     'fixed' => min($discountValue, $base),
                     default => 0,
                 };
-                $amount = $base - $discountAmount;
+                $amount = round($base - $discountAmount); // VND: làm tròn về đồng nguyên
                 $taxRate = (float) ($item['tax_rate'] ?? 0);
                 $subtotal += $amount;
-                $taxAmount += $amount * $taxRate / 100;
+                $taxAmount += round($amount * $taxRate / 100);
                 $itemStandardPrice = (float) ($standardPrices[$item['product_id']] ?? 0);
                 if ($itemStandardPrice > 0) {
                     $standardTotal += (float) $item['quantity'] * $itemStandardPrice;
@@ -507,12 +508,13 @@ class SalesOrderController extends Controller
             $orderDiscountType = $salesOrder->discount_type;
             $orderDiscountValue = (float) ($salesOrder->discount_value ?? 0);
             $orderDiscountAmount = match ($orderDiscountType) {
-                'percent' => $subtotal * $orderDiscountValue / 100,
-                'fixed' => min($orderDiscountValue, $subtotal),
+                'percent' => round($subtotal * $orderDiscountValue / 100),
+                'fixed' => min(round($orderDiscountValue), $subtotal),
                 default => 0,
             };
 
             $totalAmount = $subtotal + $taxAmount - $orderDiscountAmount;
+            $standardTotal = round($standardTotal);
             $salesOrder->update([
                 'subtotal' => $subtotal,
                 'tax_amount' => $taxAmount,
@@ -795,10 +797,10 @@ class SalesOrderController extends Controller
                             'fixed' => min($discountValue, $base),
                             default => 0,
                         };
-                        $amount = $base - $discountAmount;
+                        $amount = round($base - $discountAmount); // VND: làm tròn về đồng nguyên
                         $taxRate = (float) ($item['tax_rate'] ?? 0);
                         $subtotal += $amount;
-                        $taxAmount += $amount * $taxRate / 100;
+                        $taxAmount += round($amount * $taxRate / 100);
 
                         $order->items()->create([
                             'product_id' => $item['product_id'],

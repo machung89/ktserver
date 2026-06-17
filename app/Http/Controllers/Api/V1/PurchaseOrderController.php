@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PurchaseOrderResource;
 use App\Models\Product;
 use App\Models\PurchaseOrder;
+use App\Models\Recipe;
 use App\Models\User;
 use App\Services\ActivityLogService;
 use App\Services\PurchaseOrderService;
@@ -26,6 +27,24 @@ class PurchaseOrderController extends Controller
         protected PurchaseOrderService $purchaseOrderService,
         protected ActivityLogService $activityLog,
     ) {}
+
+    /**
+     * Chặn sản phẩm combo trong đơn nhập — combo là hàng bán-only, không có tồn riêng.
+     *
+     * @param  array<array{product_id: int}>  $items
+     */
+    private function assertNoCombo(array $items): void
+    {
+        $productIds = collect($items)->pluck('product_id')->unique()->all();
+        $comboIds = Recipe::where('type', 'combo')->whereIn('product_id', $productIds)->pluck('product_id');
+
+        if ($comboIds->isNotEmpty()) {
+            $names = Product::whereIn('id', $comboIds)->pluck('name')->implode(', ');
+            throw ValidationException::withMessages([
+                'items' => ["Không thể nhập sản phẩm combo: {$names}. Hãy nhập các sản phẩm thành phần thay vì combo."],
+            ]);
+        }
+    }
 
     /**
      * Đề xuất danh sách hàng cần nhập để đủ bán trong N ngày (mặc định 15),
@@ -73,7 +92,11 @@ class PurchaseOrderController extends Controller
             return response()->json(['data' => []]);
         }
 
-        $products = Product::whereIn('id', $candidateIds->all())->where('is_active', true)->get()->keyBy('id');
+        // Loại sản phẩm combo (bán-only, không có tồn riêng) khỏi đề xuất nhập
+        $products = Product::whereIn('id', $candidateIds->all())
+            ->where('is_active', true)
+            ->whereDoesntHave('recipe', fn ($q) => $q->where('type', 'combo'))
+            ->get()->keyBy('id');
 
         $items = [];
         foreach ($candidateIds as $pid) {
@@ -144,6 +167,8 @@ class PurchaseOrderController extends Controller
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
+
+        $this->assertNoCombo($validated['items']);
 
         $order = PurchaseOrder::create([
             'order_number' => $this->generateOrderNumber(),
@@ -231,6 +256,10 @@ class PurchaseOrderController extends Controller
             'items.*.unit_price' => ['required_with:items', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
+
+        if (isset($validated['items'])) {
+            $this->assertNoCombo($validated['items']);
+        }
 
         $purchaseOrder->update(\Arr::except($validated, ['items', 'update_cost_price']));
 

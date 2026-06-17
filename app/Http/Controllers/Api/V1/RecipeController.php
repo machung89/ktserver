@@ -18,6 +18,7 @@ class RecipeController extends Controller
             'product:id,name,unit,code',
             'ingredients.ingredient:id,name,unit,code',
         ])
+            ->when($request->type, fn ($q, $v) => $q->where('type', $v))
             ->when($request->search, fn ($q, $v) => $q->whereHas(
                 'product', fn ($p) => $p->where('name', 'like', "%{$v}%")
             ))
@@ -31,6 +32,7 @@ class RecipeController extends Controller
     {
         $data = $request->validate([
             'product_id' => ['required', 'integer', 'exists:products,id'],
+            'type' => ['nullable', 'in:recipe,combo'],
             'yield_quantity' => ['required', 'numeric', 'min:0.0001'],
             'notes' => ['nullable', 'string'],
             'ingredients' => ['required', 'array', 'min:1'],
@@ -42,6 +44,7 @@ class RecipeController extends Controller
         $recipe = Recipe::create([
             'organization_id' => $this->orgId(),
             'product_id' => $data['product_id'],
+            'type' => $data['type'] ?? 'recipe',
             'yield_quantity' => $data['yield_quantity'],
             'notes' => $data['notes'] ?? null,
         ]);

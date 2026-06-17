@@ -59,6 +59,36 @@ class SalesOrderService
         }
     }
 
+    /**
+     * Phân bổ chiết khấu cấp đơn cho từng dòng theo tỷ trọng doanh số,
+     * lưu vào sales_order_items.order_discount_alloc. Σ alloc = discount_amount.
+     */
+    private function allocateOrderDiscount(SalesOrder $order): void
+    {
+        $discount = (float) $order->discount_amount;
+        $subtotal = (float) $order->subtotal;
+
+        if ($discount <= 0 || $subtotal <= 0) {
+            $order->items()->update(['order_discount_alloc' => 0]);
+
+            return;
+        }
+
+        $items = $order->items->values();
+        $lastIdx = $items->count() - 1;
+        $allocated = 0.0;
+
+        foreach ($items as $idx => $item) {
+            if ($idx === $lastIdx) {
+                $alloc = round($discount - $allocated); // dồn phần dư vào dòng cuối (VND: đồng nguyên)
+            } else {
+                $alloc = round($discount * (float) $item->amount / $subtotal);
+                $allocated += $alloc;
+            }
+            $item->update(['order_discount_alloc' => $alloc]);
+        }
+    }
+
     public function confirm(SalesOrder $order): SalesOrder
     {
         return DB::transaction(function () use ($order) {
@@ -132,6 +162,10 @@ class SalesOrderService
             // Reload sau khi update cost_price
             $order->load('items.product');
 
+            // Phân bổ chiết khấu cấp đơn cho từng dòng (snapshot doanh thu thuần).
+            // Phần dư làm tròn dồn vào dòng cuối để Σ alloc = discount_amount tuyệt đối.
+            $this->allocateOrderDiscount($order);
+
             // Sản phẩm không có công thức: xuất kho trực tiếp (SalesDelivery)
             $nonRecipeItems = $order->items->filter(fn ($item) => ! $recipes->has($item->product_id));
             if ($nonRecipeItems->isNotEmpty()) {
@@ -193,7 +227,7 @@ class SalesOrderService
                 }
             }
 
-            $totalCost = $order->items->sum(fn ($item) => $item->quantity * $item->cost_price);
+            $totalCost = round($order->items->sum(fn ($item) => $item->quantity * $item->cost_price));
 
             // Bút toán: Nợ 131 / Có 511 + Nợ 632 / Có 156
             $lines = [
@@ -207,7 +241,9 @@ class SalesOrderService
                     'account_code' => '511',
                     'description' => "Doanh thu bán hàng - {$order->order_number}",
                     'debit' => 0,
-                    'credit' => (float) $order->subtotal,
+                    // Doanh thu thuần = tổng phải thu − thuế (lấy từ total_amount để luôn cân với 131,
+                    // mọi giá trị tiền là đồng nguyên nên không phát sinh lệch làm tròn)
+                    'credit' => round((float) $order->total_amount - (float) $order->tax_amount),
                 ],
             ];
 
@@ -298,6 +334,12 @@ class SalesOrderService
             $totalCost = 0;
             $inventoryByWarehouse = [];
 
+            // SP combo/định mức: hoàn trả phải nhập lại THÀNH PHẦN, không phải SP tổng.
+            $returnRecipes = Recipe::with('ingredients')
+                ->whereIn('product_id', collect($data['items'])->pluck('product_id')->unique()->all())
+                ->get()
+                ->keyBy('product_id');
+
             foreach ($data['items'] as $input) {
                 $productId = (int) $input['product_id'];
                 $warehouseId = (int) $input['warehouse_id'];
@@ -313,10 +355,10 @@ class SalesOrderService
                 // không dùng unit_price gốc để tránh bỏ sót chiết khấu.
                 $origQty = $original ? (float) $original->quantity : 0;
                 $netUnit = $origQty != 0 ? (float) $original->amount / $origQty : $unitPrice;
-                $netAmount = round($qty * $netUnit, 2);   // net dương của phần hoàn
-                $amount = -$netAmount;                     // lưu âm
-                $cost = round($qty * $costPrice, 2);
-                $lineTax = round($netAmount * $taxRate / 100, 2);
+                $netAmount = round($qty * $netUnit);   // net dương của phần hoàn (VND: đồng nguyên)
+                $amount = -$netAmount;                 // lưu âm
+                $cost = round($qty * $costPrice);
+                $lineTax = round($netAmount * $taxRate / 100);
 
                 $totalRevenue += $netAmount;
                 $totalTax += $lineTax;
@@ -338,26 +380,46 @@ class SalesOrderService
                     'return_note' => $returnNote,
                 ]);
 
-                $inventoryByWarehouse[$warehouseId][] = [
-                    'product_id' => $productId,
-                    'quantity' => $qty,
-                    'unit_price' => $costPrice,
-                ];
+                $recipe = $returnRecipes->get($productId);
+                if ($recipe) {
+                    // Combo/định mức: nhập lại từng thành phần theo công thức
+                    $multiplier = (float) $qty / (float) $recipe->yield_quantity;
+                    foreach ($recipe->ingredients as $ingredient) {
+                        $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
+                        $ingAvg = (float) Inventory::where([
+                            'product_id' => $ingredient->ingredient_id,
+                            'warehouse_id' => $warehouseId,
+                            'organization_id' => app('orgId'),
+                        ])->value('avg_cost');
+
+                        $inventoryByWarehouse[$warehouseId][] = [
+                            'product_id' => $ingredient->ingredient_id,
+                            'quantity' => $ingQty,
+                            'unit_price' => $ingAvg,
+                        ];
+                    }
+                } else {
+                    $inventoryByWarehouse[$warehouseId][] = [
+                        'product_id' => $productId,
+                        'quantity' => $qty,
+                        'unit_price' => $costPrice,
+                    ];
+                }
             }
 
             // Tính lại tổng tiền đơn hàng sau hoàn trả
             $order->load('items');
-            $newSubtotal = (float) $order->items->sum('amount');
-            $newTaxAmount = (float) $order->items->sum(fn ($i) => $i->amount * $i->tax_rate / 100);
-            $newTotal = round($newSubtotal + $newTaxAmount, 2);
+            $newSubtotal = round((float) $order->items->sum('amount'));
+            $newTaxAmount = round((float) $order->items->sum(fn ($i) => $i->amount * $i->tax_rate / 100));
+            $newTotal = $newSubtotal + $newTaxAmount;
             // Giá chuẩn & lời/lỗ NV theo số lượng ròng (dòng hoàn có qty âm nên tự trừ)
-            $newStandardTotal = round((float) $order->items->sum(fn ($i) => (float) $i->quantity * (float) $i->standard_price), 2);
+            $newStandardTotal = round((float) $order->items->sum(fn ($i) => (float) $i->quantity * (float) $i->standard_price));
             $order->update([
-                'subtotal' => round($newSubtotal, 2),
-                'tax_amount' => round($newTaxAmount, 2),
+                'subtotal' => $newSubtotal,
+                'tax_amount' => $newTaxAmount,
                 'total_amount' => $newTotal,
                 'standard_total' => $newStandardTotal,
-                'employee_profit' => $newStandardTotal > 0 ? round($newTotal - $newStandardTotal, 2) : 0,
+                'employee_profit' => $newStandardTotal > 0 ? $newTotal - $newStandardTotal : 0,
             ]);
 
             // Đồng bộ trạng thái thanh toán theo tổng tiền mới
@@ -377,7 +439,7 @@ class SalesOrderService
 
             if ($totalRevenue > 0) {
                 $desc = "Hàng bán bị trả lại - {$order->order_number}";
-                $totalGross = round($totalRevenue + $totalTax, 2);
+                $totalGross = round($totalRevenue + $totalTax);
                 // Đảo chiều bút toán bán hàng: Nợ 511 (+ Nợ 33311 thuế) / Có 131 + Nợ 156 / Có 632
                 $lines = [
                     ['account_code' => '511', 'description' => $desc, 'debit' => $totalRevenue, 'credit' => 0],

@@ -24,6 +24,7 @@ class ProductResource extends JsonResource
             'price' => $this->price,
             'standard_price' => $this->standard_price,
             'cost_price' => $this->cost_price,
+            'weight' => $this->weight,
             'is_active' => $this->is_active,
             'units' => $this->whenLoaded('units', fn () => $this->units->map(fn ($u) => [
                 'id' => $u->id,

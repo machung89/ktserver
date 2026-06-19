@@ -3,13 +3,17 @@
 namespace Tests\Feature;
 
 use App\Enums\CompanyType;
+use App\Models\Account;
 use App\Models\Company;
 use App\Models\Inventory;
+use App\Models\Payment;
+use App\Models\PaymentAllocation;
 use App\Models\Product;
 use App\Models\Recipe;
 use App\Models\SalesOrder;
 use App\Models\Warehouse;
 use App\Services\DefaultAccountsService;
+use App\Services\PaymentService;
 use App\Services\SalesOrderService;
 use Database\Seeders\SystemAccountsSeeder;
 use PHPUnit\Framework\Attributes\TestDox;
@@ -306,6 +310,212 @@ class SalesOrderTest extends TestCase
             ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
 
         $this->assertEquals((float) $sums->d, (float) $sums->c, 'Tổng Nợ = Tổng Có dù tổng tiền có phần lẻ');
+    }
+
+    #[TestDox('Thu nợ gộp: phân bổ FIFO đơn cũ trước, đơn cuối trả 1 phần')]
+    public function test_bulk_receipt_allocates_fifo(): void
+    {
+        // Đơn 1 cũ hơn (hôm qua) + đơn 2 mới hơn, mỗi đơn 200.000
+        $o1 = $this->postJson('/api/v1/sales', $this->validPayload(['order_date' => now()->subDay()->toDateString()]))->assertCreated()->json('data');
+        $o2 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o1['id']));
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o2['id']));
+
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+
+        // Khách trả 250.000 → đơn 1 đủ 200.000, đơn 2 trả 50.000
+        $res = $this->postJson('/api/v1/payments/bulk-receipt', [
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 250000,
+        ])->assertOk()->json();
+
+        $this->assertEquals(2, $res['allocated_orders']);
+        $this->assertEquals(250000, $res['allocated_amount']);
+        $this->assertEquals(0, $res['advance']);
+        $this->assertEquals(200000.0, (float) SalesOrder::find($o1['id'])->paid_amount, 'Đơn cũ được trả đủ trước');
+        $this->assertEquals(50000.0, (float) SalesOrder::find($o2['id'])->paid_amount, 'Đơn mới trả phần còn lại');
+        $this->assertEquals('paid', SalesOrder::find($o1['id'])->payment_status->value);
+        $this->assertEquals('partial', SalesOrder::find($o2['id'])->payment_status->value);
+
+        // Chỉ MỘT phiếu thu cho cả cục (dễ tra soát) + 2 dòng phân bổ
+        $this->assertEquals(1, Payment::where('type', 'receipt')->count(), 'Một lần thu gộp = 1 phiếu thu');
+        $this->assertEquals(2, PaymentAllocation::count());
+        // Một bút toán duy nhất cho phiếu, cân Nợ = Có = 250.000
+        $payment = Payment::where('type', 'receipt')->firstOrFail();
+        $sums = \DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->where('j.reference_type', Payment::class)->where('j.reference_id', $payment->id)
+            ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
+        $this->assertEquals(250000.0, (float) $sums->d);
+        $this->assertEquals((float) $sums->d, (float) $sums->c, 'Bút toán phiếu thu gộp cân');
+
+        // Lịch sử thanh toán trong chi tiết đơn KHÔNG trống dù thu gộp (đọc qua allocations)
+        $detail = $this->getJson("/api/v1/sales/{$o1['id']}")->assertOk()->json('data');
+        $this->assertCount(1, $detail['payments']);
+        $this->assertEquals(200000.0, (float) $detail['payments'][0]['amount']);
+        $this->assertTrue($detail['payments'][0]['allocated']);
+    }
+
+    #[TestDox('Xóa phiếu thu gộp: hoàn lại công nợ tất cả đơn đã phân bổ')]
+    public function test_deleting_bulk_receipt_reverses_allocations(): void
+    {
+        $o1 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        $o2 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o1['id']));
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o2['id']));
+
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+        $this->postJson('/api/v1/payments/bulk-receipt', [
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 400000,
+        ])->assertOk();
+
+        $payment = Payment::where('type', 'receipt')->firstOrFail();
+        $this->deleteJson("/api/v1/payments/{$payment->id}")->assertNoContent();
+
+        // Cả 2 đơn về lại chưa thanh toán, allocations bị xóa theo
+        $this->assertEquals(0.0, (float) SalesOrder::find($o1['id'])->paid_amount);
+        $this->assertEquals(0.0, (float) SalesOrder::find($o2['id'])->paid_amount);
+        $this->assertEquals('unpaid', SalesOrder::find($o1['id'])->payment_status->value);
+        $this->assertEquals(0, PaymentAllocation::count());
+    }
+
+    #[TestDox('Thu nợ gộp chọn tùy chỉnh: chỉ áp đúng đơn & số tiền đã chọn')]
+    public function test_bulk_receipt_custom_allocation(): void
+    {
+        $o1 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        $o2 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        $o3 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        foreach ([$o1, $o2, $o3] as $o) {
+            app(SalesOrderService::class)->confirm(SalesOrder::find($o['id']));
+        }
+
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+
+        // Chọn tay: đơn 1 trả đủ 200k, đơn 3 trả một phần 50k, BỎ QUA đơn 2
+        $res = $this->postJson('/api/v1/payments/bulk-receipt', [
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(),
+            'allocations' => [
+                ['sales_order_id' => $o1['id'], 'amount' => 200000],
+                ['sales_order_id' => $o3['id'], 'amount' => 50000],
+            ],
+        ])->assertOk()->json();
+
+        $this->assertEquals(2, $res['allocated_orders']);
+        $this->assertEquals(250000, $res['allocated_amount']);
+        $this->assertEquals('paid', SalesOrder::find($o1['id'])->payment_status->value);
+        $this->assertEquals('unpaid', SalesOrder::find($o2['id'])->payment_status->value, 'Đơn không chọn không bị thu');
+        $this->assertEquals('partial', SalesOrder::find($o3['id'])->payment_status->value);
+        $this->assertEquals(50000.0, (float) SalesOrder::find($o3['id'])->paid_amount);
+        $this->assertEquals(1, Payment::where('type', 'receipt')->count(), 'Vẫn 1 phiếu thu');
+    }
+
+    #[TestDox('Thu nợ gộp: tiền dư hơn tổng nợ → ghi nhận thu trước')]
+    public function test_bulk_receipt_excess_becomes_advance(): void
+    {
+        $o1 = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o1['id']));
+
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+
+        // Tổng nợ 200.000, khách trả 300.000 → dư 100.000 thành credit (giữ trên CÙNG 1 phiếu)
+        $res = $this->postJson('/api/v1/payments/bulk-receipt', [
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 300000,
+        ])->assertOk()->json();
+
+        $this->assertEquals(200000, $res['allocated_amount']);
+        $this->assertEquals(100000, $res['advance']);
+        $this->assertEquals('paid', SalesOrder::find($o1['id'])->payment_status->value);
+
+        // Mô hình hợp nhất: 1 lần khách đưa tiền = ĐÚNG 1 phiếu thu (đủ 300k), phần dư là credit
+        $this->assertEquals(1, Payment::count(), 'Trả dư vẫn chỉ 1 phiếu thu');
+        $this->assertEquals(300000.0, (float) Payment::firstOrFail()->amount);
+        $this->assertEquals(100000.0, app(PaymentService::class)->availableAdvance($this->customer->id, $this->organization->id), 'Phần dư = credit khách');
+
+        // Xóa phiếu → đảo toàn bộ (allocations + credit)
+        $this->deleteJson('/api/v1/payments/'.Payment::firstOrFail()->id)->assertNoContent();
+        $this->assertEquals(0, Payment::count());
+        $this->assertEquals(0, PaymentAllocation::count());
+        $this->assertEquals(0.0, app(PaymentService::class)->availableAdvance($this->customer->id, $this->organization->id));
+        $this->assertEquals('unpaid', SalesOrder::find($o1['id'])->payment_status->value);
+    }
+
+    #[TestDox('Gỡ áp một phân bổ: đơn về chưa thanh toán, tiền quay lại credit khách')]
+    public function test_unapply_allocation_returns_money_to_credit(): void
+    {
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+
+        // Nhận 300k thu trước, đơn 200k đã xác nhận, áp 200k vào đơn
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt', 'company_id' => $this->customer->id, 'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(), 'amount' => 300000, 'is_advance' => true,
+        ])->assertCreated();
+        $o = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o['id']));
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt', 'company_id' => $this->customer->id, 'payment_date' => now()->toDateString(),
+            'amount' => 200000, 'reference_type' => SalesOrder::class, 'reference_id' => $o['id'], 'is_advance' => true,
+        ])->assertCreated();
+
+        $this->assertEquals('paid', SalesOrder::find($o['id'])->payment_status->value);
+        $this->assertEquals(100000.0, app(PaymentService::class)->availableAdvance($this->customer->id, $this->organization->id));
+
+        // Gỡ áp khỏi đơn → đơn về unpaid, 200k quay lại credit (tổng credit = 300k), KHÔNG xóa phiếu thu
+        $alloc = PaymentAllocation::firstOrFail();
+        $this->deleteJson("/api/v1/payments/allocations/{$alloc->id}")->assertNoContent();
+
+        $this->assertEquals(1, Payment::count(), 'Phiếu thu vẫn còn');
+        $this->assertEquals(0, PaymentAllocation::count());
+        $this->assertEquals('unpaid', SalesOrder::find($o['id'])->payment_status->value);
+        $this->assertEquals(300000.0, app(PaymentService::class)->availableAdvance($this->customer->id, $this->organization->id), 'Tiền gỡ ra quay về credit');
+    }
+
+    #[TestDox('Dùng tiền thu trước cho đơn: phân bổ, KHÔNG tạo phiếu thu mới')]
+    public function test_apply_advance_uses_allocation_not_new_receipt(): void
+    {
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+
+        // Nhận tiền thu trước 300.000 (chưa gắn đơn) → 1 phiếu thu + bút toán
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt',
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 300000,
+            'is_advance' => true,
+        ])->assertCreated();
+        $this->assertEquals(1, Payment::count());
+        $this->assertEquals(300000.0, app(PaymentService::class)->availableAdvance($this->customer->id, $this->organization->id));
+
+        // Đơn 200.000 đã xác nhận
+        $o = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($o['id']));
+
+        // Dùng tiền thu trước áp vào đơn
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt',
+            'company_id' => $this->customer->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 200000,
+            'reference_type' => SalesOrder::class,
+            'reference_id' => $o['id'],
+            'is_advance' => true,
+        ])->assertCreated();
+
+        // KHÔNG tạo phiếu thu thừa — vẫn chỉ 1 phiếu (phiếu nhận tiền trước), chỉ thêm 1 dòng phân bổ
+        $this->assertEquals(1, Payment::count(), 'Dùng tiền thu trước không tạo phiếu thu thừa');
+        $this->assertEquals(1, PaymentAllocation::count());
+        $this->assertEquals('paid', SalesOrder::find($o['id'])->payment_status->value);
+        $this->assertEquals(100000.0, app(PaymentService::class)->availableAdvance($this->customer->id, $this->organization->id), 'Tiền thu trước còn lại sau khi áp');
     }
 
     #[TestDox('Báo cáo doanh thu theo SP khớp với tổng đơn (phân bổ chiết khấu cấp đơn)')]

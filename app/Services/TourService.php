@@ -65,9 +65,10 @@ class TourService
      */
     private function buildJournalLines(Tour $tour): array
     {
-        $totalRevenue = (float) $tour->total_amount;
-        $taxAmount = (float) $tour->tax_amount;
-        $netRevenue = round($totalRevenue - $taxAmount, 2);
+        // VND: làm tròn về đồng nguyên; các vế suy ra từ cùng giá trị đã làm tròn để luôn cân
+        $totalRevenue = round((float) $tour->total_amount);
+        $taxAmount = round((float) $tour->tax_amount);
+        $netRevenue = $totalRevenue - $taxAmount;
 
         if ($taxAmount > 0) {
             $lines = [
@@ -107,11 +108,12 @@ class TourService
             ];
         }
 
-        $totalCost = $tour->services->sum(fn ($s) => (float) $s->cost);
+        // Giá vốn: 331 (Có) = 632 + 1331 (Nợ) — input VAT suy ra để cân tuyệt đối
+        $totalCost = round($tour->services->sum(fn ($s) => (float) $s->cost));
         $totalBaseCost = round($tour->services->sum(
             fn ($s) => (float) $s->unit_price * (int) $s->quantity * (int) $s->days
-        ), 2);
-        $totalInputVat = round($totalCost - $totalBaseCost, 2);
+        ));
+        $totalInputVat = $totalCost - $totalBaseCost;
 
         if ($totalCost > 0) {
             if ($totalInputVat > 0) {

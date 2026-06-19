@@ -81,6 +81,11 @@ class EmployeeController extends Controller
 
         $employee->update($data);
 
+        // Khóa tài khoản → thu hồi mọi token đang đăng nhập (đăng xuất ngay lập tức)
+        if (array_key_exists('is_active', $data) && ! $data['is_active']) {
+            $employee->tokens()->delete();
+        }
+
         if (array_key_exists('role_ids', $data)) {
             $employee->roles()->sync($data['role_ids'] ?? []);
         }

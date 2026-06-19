@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
-#[Fillable(['code', 'barcode', 'name', 'description', 'image_path', 'unit', 'category_id', 'price', 'standard_price', 'cost_price', 'is_active', 'product_type', 'organization_id'])]
+#[Fillable(['code', 'barcode', 'name', 'description', 'image_path', 'unit', 'category_id', 'price', 'standard_price', 'cost_price', 'weight', 'is_active', 'product_type', 'organization_id'])]
 class Product extends Model
 {
     /** @use HasFactory<ProductFactory> */
@@ -28,6 +28,7 @@ class Product extends Model
             'price' => 'decimal:2',
             'standard_price' => 'decimal:2',
             'cost_price' => 'decimal:2',
+            'weight' => 'integer',
             'is_active' => 'boolean',
         ];
     }

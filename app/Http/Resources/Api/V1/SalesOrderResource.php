@@ -47,15 +47,36 @@ class SalesOrderResource extends JsonResource
             'created_by_name' => $this->whenLoaded('createdBy', fn () => $this->createdBy?->name),
             'company' => new CompanyResource($this->whenLoaded('company')),
             'items' => SalesOrderItemResource::collection($this->whenLoaded('items')),
-            'payments' => $this->whenLoaded('payments', fn () => $this->payments->map(fn ($p) => [
-                'id' => $p->id,
-                'payment_number' => $p->payment_number,
-                'payment_date' => $p->payment_date,
-                'amount' => (float) $p->amount,
-                'description' => $p->description,
-                'account_name' => $p->account?->name,
-                'status' => $p->status,
-            ])),
+            // Lịch sử thanh toán = phiếu gắn trực tiếp + phần được phân bổ từ phiếu thu gộp/tiền thu trước
+            'payments' => $this->when(
+                $this->relationLoaded('payments') || $this->relationLoaded('allocations'),
+                fn () => collect()
+                    ->merge($this->relationLoaded('payments') ? $this->payments->map(fn ($p) => [
+                        'id' => 'pay-'.$p->id,
+                        'payment_id' => $p->id,
+                        'payment_number' => $p->payment_number,
+                        'payment_date' => $p->payment_date,
+                        'amount' => (float) $p->amount,
+                        'description' => $p->description,
+                        'account_name' => $p->account?->name,
+                        'status' => $p->status,
+                        'allocated' => false,
+                    ]) : [])
+                    ->merge($this->relationLoaded('allocations') ? $this->allocations->map(fn ($a) => [
+                        'id' => 'alloc-'.$a->id,
+                        'allocation_id' => $a->id,
+                        'payment_id' => $a->payment_id,
+                        'payment_number' => $a->payment?->payment_number,
+                        'payment_date' => $a->payment?->payment_date,
+                        'amount' => (float) $a->amount,
+                        'description' => $a->payment?->description,
+                        'account_name' => $a->payment?->account?->name,
+                        'status' => $a->payment?->status,
+                        'allocated' => true,
+                    ]) : [])
+                    ->sortBy('payment_date')
+                    ->values()
+            ),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

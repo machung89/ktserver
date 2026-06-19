@@ -59,25 +59,39 @@ class FixedAsset extends Model
 
     public function annualDepreciation(): float
     {
-        $depreciable = (float) $this->cost - (float) $this->residual_value;
+        $depreciable = round((float) $this->cost - (float) $this->residual_value);
 
-        return round($depreciable / $this->useful_life_years, 2);
+        return round($depreciable / (int) $this->useful_life_years);
+    }
+
+    /**
+     * Khấu hao của một năm cụ thể (VND: đồng nguyên). Năm cuối ôm phần dư làm tròn
+     * để Σ khấu hao = nguyên giá − giá trị thanh lý tuyệt đối.
+     */
+    public function depreciationForYear(int $year): float
+    {
+        $startYear = (int) $this->depreciation_start_date->format('Y');
+        $idx = $year - $startYear;
+        $life = (int) $this->useful_life_years;
+        $totalDepreciable = round((float) $this->cost - (float) $this->residual_value);
+        $annual = round($totalDepreciable / $life);
+
+        return ($idx === $life - 1)
+            ? $totalDepreciable - $annual * ($life - 1)   // năm cuối = phần còn lại
+            : $annual;
     }
 
     /** @return array<int, array{year: int, amount: float, posted: bool, journal_entry_id: int|null, posted_at: string|null}> */
     public function depreciationSchedule(): array
     {
         $startYear = (int) $this->depreciation_start_date->format('Y');
-        $annual = $this->annualDepreciation();
         $posted = $this->depreciations->keyBy('year');
-        $totalDepreciable = (float) $this->cost - (float) $this->residual_value;
         $accumulated = 0.0;
 
         $schedule = [];
         for ($i = 0; $i < $this->useful_life_years; $i++) {
             $year = $startYear + $i;
-            $isLast = ($i === $this->useful_life_years - 1);
-            $amount = $isLast ? round($totalDepreciable - $accumulated, 2) : $annual;
+            $amount = $this->depreciationForYear($year);
             $accumulated += $amount;
 
             $record = $posted->get($year);

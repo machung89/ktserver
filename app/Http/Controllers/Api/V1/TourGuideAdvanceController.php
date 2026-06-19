@@ -45,6 +45,8 @@ class TourGuideAdvanceController extends Controller
 
         abort_unless($tour->organization_id === $this->orgId(), 403);
 
+        $validated['amount'] = round((float) $validated['amount']); // VND: đồng nguyên
+
         $advance = DB::transaction(function () use ($tour, $validated) {
             $advance = TourGuideAdvance::create([
                 'organization_id' => $this->orgId(),

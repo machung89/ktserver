@@ -218,6 +218,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::get('payments/advance-balance', [PaymentController::class, 'advanceBalance'])->middleware('permission:payments.view');
         Route::get('payments/{payment}', [PaymentController::class, 'show'])->middleware('permission:payments.view');
         Route::post('payments', [PaymentController::class, 'store'])->middleware('permission:payments.create');
+        Route::post('payments/bulk-receipt', [PaymentController::class, 'bulkReceipt'])->middleware('permission:payments.create');
+        Route::delete('payments/allocations/{allocation}', [PaymentController::class, 'destroyAllocation'])->middleware('permission:payments.delete');
         Route::post('payments/{payment}/approve', [PaymentController::class, 'approve'])->middleware('permission:payments.create');
         Route::delete('payments/{payment}', [PaymentController::class, 'destroy'])->middleware('permission:payments.delete');
 
@@ -279,6 +281,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::middleware('permission:settings.edit')->group(function () {
             Route::get('organization', [OrganizationController::class, 'show']);
             Route::put('organization', [OrganizationController::class, 'update']);
+            Route::post('organization/logo', [OrganizationController::class, 'uploadLogo']);
+            Route::delete('organization/logo', [OrganizationController::class, 'deleteLogo']);
             Route::post('organization/reset-data', [OrganizationController::class, 'resetData']);
             Route::post('organization/delete-all-products', [OrganizationController::class, 'deleteAllProducts']);
             Route::post('organization/delete-all-companies', [OrganizationController::class, 'deleteAllCompanies']);

@@ -2,12 +2,15 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
 use App\Enums\PaymentType;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PaymentResource;
 use App\Models\JournalEntry;
 use App\Models\Payment;
+use App\Models\PaymentAllocation;
 use App\Models\PurchaseOrder;
 use App\Models\SalesOrder;
 use App\Models\Tour;
@@ -34,7 +37,7 @@ class PaymentController extends Controller
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $payments = Payment::with(['company.bank', 'account', 'toAccount', 'expenseAccount'])
+        $payments = Payment::with(['company.bank', 'account', 'toAccount', 'expenseAccount', 'allocations.salesOrder:id,order_number'])
             ->when($request->type, fn ($q, $v) => $q->where('type', $v))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
@@ -92,7 +95,8 @@ class PaymentController extends Controller
                 $remaining = $totalAmount < 0
                     ? abs($totalAmount) - abs($paidAmount)
                     : $totalAmount - $paidAmount;
-                if ((float) $validated['amount'] > $remaining + 0.01) {
+                // VND: so sánh ở mức đồng nguyên, tránh chặn nhầm khi dữ liệu cũ còn đồng lẻ
+                if (round((float) $validated['amount']) > round($remaining)) {
                     throw ValidationException::withMessages([
                         'amount' => [sprintf(
                             'Số tiền thanh toán (%s₫) vượt quá số tiền còn nợ (%s₫).',
@@ -110,7 +114,7 @@ class PaymentController extends Controller
                 (int) $validated['company_id'],
                 $this->orgId()
             );
-            if ((float) $validated['amount'] > $available + 0.01) {
+            if (round((float) $validated['amount']) > round($available)) {
                 throw ValidationException::withMessages([
                     'amount' => [sprintf(
                         'Số tiền áp dụng (%s₫) vượt quá tiền thu trước còn lại (%s₫).',
@@ -119,6 +123,29 @@ class PaymentController extends Controller
                     )],
                 ]);
             }
+        }
+
+        // Dùng tiền thu trước cho đơn BÁN → phân bổ (không tạo phiếu thu thừa, không bút toán mới)
+        $isSalesAdvance = $isApplyingAdvance
+            && ($validated['reference_type'] ?? null) === SalesOrder::class
+            && $validated['type'] === PaymentType::Receipt->value;
+
+        if ($isSalesAdvance) {
+            $this->paymentService->applyAdvanceToOrder(
+                (int) $validated['company_id'],
+                (int) $validated['reference_id'],
+                (float) $validated['amount'],
+                $this->orgId(),
+            );
+
+            $this->activityLog->log(
+                $this->orgId(), Auth::id(),
+                'advance_applied',
+                'Áp tiền thu trước '.number_format((float) $validated['amount']).'đ vào đơn',
+                null, [], 'sales_order', (int) $validated['reference_id']
+            );
+
+            return response()->json(['applied' => round((float) $validated['amount'])], 201);
         }
 
         $payment = $this->paymentService->create(array_merge($validated, ['organization_id' => $this->orgId()]));
@@ -147,9 +174,183 @@ class PaymentController extends Controller
         return (new PaymentResource($payment))->response()->setStatusCode(201);
     }
 
+    /**
+     * Thu tiền gộp: khách trả một cục cho nhiều đơn còn nợ.
+     * Hệ thống tự quét các đơn còn nợ và phân bổ theo FIFO (đơn cũ trước) tới khi hết tiền.
+     * Phần dư (nếu vượt tổng nợ) ghi nhận thành tiền thu trước cho khách.
+     */
+    public function bulkReceipt(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'company_id' => ['required', 'exists:companies,id'],
+            'account_id' => ['required', 'exists:accounts,id'],
+            'payment_date' => ['required', 'date'],
+            'amount' => ['nullable', 'numeric', 'min:0.01'],
+            'description' => ['nullable', 'string'],
+            'keep_excess_as_advance' => ['boolean'],
+            // Tùy chỉnh: phân bổ tay từng đơn. Rỗng => phân bổ tự động FIFO theo `amount`.
+            'allocations' => ['nullable', 'array'],
+            'allocations.*.sales_order_id' => ['required_with:allocations', 'integer'],
+            'allocations.*.amount' => ['required_with:allocations', 'numeric', 'min:0'],
+        ]);
+
+        $orgId = $this->orgId();
+        $companyId = (int) $validated['company_id'];
+        $keepExcess = $request->boolean('keep_excess_as_advance', true);
+
+        // Chọn tay: chỉ giữ dòng có tiền > 0
+        $custom = collect($validated['allocations'] ?? [])
+            ->filter(fn ($a) => round((float) $a['amount']) > 0)
+            ->values();
+
+        if ($custom->isEmpty() && empty($validated['amount'])) {
+            throw ValidationException::withMessages(['amount' => ['Nhập số tiền hoặc chọn đơn để thu.']]);
+        }
+
+        $result = DB::transaction(function () use ($validated, $orgId, $companyId, $keepExcess, $custom) {
+            $desc = ($validated['description'] ?? null) ?: 'Thu gộp nhiều đơn';
+            $allocations = [];   // dùng để ghi payment_allocations
+            $summary = [];       // trả về cho frontend
+
+            if ($custom->isNotEmpty()) {
+                // ── Phân bổ TAY: chỉ áp vào đúng các đơn đã chọn, mỗi đơn không vượt số còn nợ ──
+                $orders = SalesOrder::where('company_id', $companyId)
+                    ->whereIn('id', $custom->pluck('sales_order_id')->all())
+                    ->whereIn('status', [OrderStatus::Confirmed, OrderStatus::Shipping, OrderStatus::Completed])
+                    ->where('total_amount', '>', 0)
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+                foreach ($custom as $c) {
+                    $order = $orders->get((int) $c['sales_order_id']);
+                    if (! $order) {
+                        continue;
+                    }
+                    $remaining = round((float) $order->total_amount - (float) $order->paid_amount);
+                    $pay = min(round((float) $c['amount']), max(0, $remaining));
+                    if ($pay <= 0) {
+                        continue;
+                    }
+                    $allocations[] = ['sales_order_id' => $order->id, 'amount' => $pay];
+                    $summary[] = [
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'paid' => $pay,
+                        'fully_paid' => ($remaining - $pay) <= 0,
+                    ];
+                }
+
+                $allocatedSum = (float) array_sum(array_column($allocations, 'amount'));
+                // Số tiền thật = số nhập (nếu có & lớn hơn) để phần dư thành credit; mặc định = tổng đã áp
+                $totalAmount = max($allocatedSum, round((float) ($validated['amount'] ?? 0)));
+                $leftover = $totalAmount - $allocatedSum;
+            } else {
+                // ── Phân bổ TỰ ĐỘNG FIFO theo số tiền nhập ──
+                $totalAmount = round((float) $validated['amount']);
+                $leftover = $totalAmount;
+
+                $orders = SalesOrder::where('company_id', $companyId)
+                    ->whereIn('status', [OrderStatus::Confirmed, OrderStatus::Shipping, OrderStatus::Completed])
+                    ->whereIn('payment_status', [PaymentStatus::Unpaid, PaymentStatus::Partial])
+                    ->where('total_amount', '>', 0)
+                    ->orderBy('order_date')
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
+
+                foreach ($orders as $order) {
+                    if ($leftover <= 0) {
+                        break;
+                    }
+                    $remaining = round((float) $order->total_amount - (float) $order->paid_amount);
+                    if ($remaining <= 0) {
+                        continue;
+                    }
+                    $pay = min($remaining, $leftover);
+                    $leftover -= $pay;
+
+                    $allocations[] = ['sales_order_id' => $order->id, 'amount' => $pay];
+                    $summary[] = [
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'paid' => $pay,
+                        'fully_paid' => ($remaining - $pay) <= 0,
+                    ];
+                }
+            }
+
+            // MỘT phiếu thu duy nhất cho cả lần khách đưa tiền (1 chứng từ, 1 bút toán).
+            $allocatedSum = $totalAmount - $leftover;
+            $received = $keepExcess ? $totalAmount : $allocatedSum;
+            $advance = $keepExcess ? $leftover : 0;
+
+            if ($received > 0) {
+                $this->paymentService->createReceiptWithAllocations([
+                    'company_id' => $companyId,
+                    'account_id' => (int) $validated['account_id'],
+                    'payment_date' => $validated['payment_date'],
+                    'amount' => $received,
+                    'description' => $desc,
+                    'organization_id' => $orgId,
+                ], $allocations);
+            }
+
+            return [
+                'allocations' => $summary,
+                'advance' => $advance,
+                'unallocated' => $keepExcess ? 0 : $leftover,
+                'allocated_amount' => $allocatedSum,
+            ];
+        });
+
+        $allocatedToOrders = $result['allocated_amount'];
+
+        $this->activityLog->log(
+            $orgId, Auth::id(),
+            'payment_bulk_receipt',
+            'Thu gộp '.number_format($allocatedToOrders).'đ cho '.count($result['allocations']).' đơn'
+                .($result['advance'] > 0 ? ' (+ '.number_format($result['advance']).'đ thu trước)' : ''),
+            null, [], 'company', $companyId
+        );
+
+        return response()->json([
+            'allocated_orders' => count($result['allocations']),
+            'allocated_amount' => $allocatedToOrders,
+            'allocations' => $result['allocations'],
+            'advance' => $result['advance'],
+            'unallocated' => $result['unallocated'],
+        ]);
+    }
+
+    /**
+     * Gỡ áp một phân bổ khỏi đơn — tiền quay về credit của khách (không đụng phiếu thu/bút toán).
+     */
+    public function destroyAllocation(PaymentAllocation $allocation): JsonResponse
+    {
+        abort_unless($allocation->organization_id === $this->orgId(), 403);
+
+        $orderId = $allocation->sales_order_id;
+        $amount = (float) $allocation->amount;
+
+        DB::transaction(function () use ($allocation, $orderId) {
+            $allocation->delete();
+            SalesOrder::find($orderId)?->syncPaymentStatus();
+        });
+
+        $this->activityLog->log(
+            $this->orgId(), Auth::id(),
+            'allocation_removed',
+            'Gỡ áp '.number_format($amount).'đ khỏi đơn (tiền về credit khách)',
+            null, [], 'sales_order', $orderId
+        );
+
+        return response()->json(null, 204);
+    }
+
     public function show(Payment $payment): PaymentResource
     {
-        return new PaymentResource($payment->load(['company.bank', 'account']));
+        return new PaymentResource($payment->load(['company.bank', 'account', 'toAccount', 'expenseAccount', 'createdBy:id,name', 'allocations.salesOrder:id,order_number']));
     }
 
     public function approve(Request $request, Payment $payment): JsonResponse
@@ -240,10 +441,36 @@ class PaymentController extends Controller
                 ? $payment->reference
                 : null;
 
+            // Phiếu thu gộp: lấy các đơn đã phân bổ để đồng bộ lại sau khi xóa (allocations cascade)
+            $allocatedOrderIds = $payment->allocations()->pluck('sales_order_id')->all();
+
+            // Đảo các phiếu cùng nhóm thu gộp (vd phiếu thu trước phần dư) — một thao tác = hủy toàn bộ
+            if ($payment->group_id) {
+                $siblings = Payment::where('group_id', $payment->group_id)
+                    ->where('id', '!=', $payment->id)
+                    ->get();
+                foreach ($siblings as $sib) {
+                    JournalEntry::where('reference_type', Payment::class)
+                        ->where('reference_id', $sib->id)
+                        ->each(function ($entry) {
+                            $entry->lines()->delete();
+                            $entry->delete();
+                        });
+                    $sibOrderIds = $sib->allocations()->pluck('sales_order_id')->all();
+                    $sib->delete();
+                    foreach ($sibOrderIds as $orderId) {
+                        $allocatedOrderIds[] = $orderId;
+                    }
+                }
+            }
+
             $payment->delete();
 
             // Tính lại paid_amount & payment_status cho đơn bán/nhập (sum loại bỏ phiếu vừa xóa)
             $orderRef?->syncPaymentStatus();
+            foreach (array_unique($allocatedOrderIds) as $orderId) {
+                SalesOrder::find($orderId)?->syncPaymentStatus();
+            }
         });
 
         $typeLabels = [

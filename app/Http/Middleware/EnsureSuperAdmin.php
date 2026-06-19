@@ -15,8 +15,14 @@ class EnsureSuperAdmin
      */
     public function handle(Request $request, Closure $next): Response
     {
-        if (! $request->user()?->is_super_admin) {
+        $user = $request->user();
+
+        if (! $user?->is_super_admin) {
             return response()->json(['message' => 'Chỉ quản trị hệ thống mới được truy cập.'], 403);
+        }
+
+        if (! $user->is_active) {
+            return response()->json(['message' => 'Tài khoản đã bị khóa.'], 403);
         }
 
         return $next($request);

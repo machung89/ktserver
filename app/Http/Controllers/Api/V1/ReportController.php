@@ -269,39 +269,34 @@ class ReportController extends Controller
     {
         $orgId = $this->orgId();
 
-        // Tổng hợp bằng SQL (SUM/GROUP BY) — không nạp toàn bộ đơn & phiếu thu vào PHP.
+        // Công nợ = Σ(tổng đơn − đã thu) trên đơn đã lên sổ 131 (xác nhận/đang giao/hoàn thành).
+        // paid_amount đã đồng bộ allocations (thu gộp / tiền thu trước) → nhất quán với per-order & stats.
         // DB::table bỏ qua global scope nên phải tự lọc organization_id.
-        $sales = DB::table('sales_orders')
+        $rows = DB::table('sales_orders')
             ->where('organization_id', $orgId)
-            ->whereIn('status', ['confirmed', 'completed'])
+            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
             ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('created_by', $v))
             ->groupBy('company_id')
-            ->select('company_id', DB::raw('SUM(total_amount) as total'))
-            ->pluck('total', 'company_id');
-
-        $receipts = DB::table('payments')
-            ->where('organization_id', $orgId)
-            ->where('type', 'receipt')
-            ->groupBy('company_id')
-            ->select('company_id', DB::raw('SUM(amount) as total'))
-            ->pluck('total', 'company_id');
+            ->select(
+                'company_id',
+                DB::raw('SUM(total_amount) as total_sales'),
+                DB::raw('SUM(paid_amount) as total_receipts'),
+                DB::raw('SUM(total_amount - paid_amount) as balance'),
+            )
+            ->havingRaw('SUM(total_amount - paid_amount) > 0')
+            ->get();
 
         $names = DB::table('companies')
             ->where('organization_id', $orgId)
-            ->whereIn('id', $sales->keys()->filter())
+            ->whereIn('id', $rows->pluck('company_id')->filter())
             ->pluck('name', 'id');
 
-        $data = $sales->map(function ($total, $companyId) use ($receipts, $names) {
-            $totalSales = (float) $total;
-            $totalReceipts = (float) ($receipts[$companyId] ?? 0);
-
-            return [
-                'company_name' => $names[$companyId] ?? '',
-                'total_sales' => $totalSales,
-                'total_receipts' => $totalReceipts,
-                'balance' => $totalSales - $totalReceipts,
-            ];
-        })->values()->filter(fn ($r) => $r['balance'] > 0)->values();
+        $data = $rows->map(fn ($r) => [
+            'company_name' => $names[$r->company_id] ?? '',
+            'total_sales' => (float) $r->total_sales,
+            'total_receipts' => (float) $r->total_receipts,
+            'balance' => (float) $r->balance,
+        ])->values();
 
         return response()->json(['data' => $data, 'total_balance' => $data->sum('balance')]);
     }
@@ -310,37 +305,31 @@ class ReportController extends Controller
     {
         $orgId = $this->orgId();
 
-        $purchases = DB::table('purchase_orders')
+        $rows = DB::table('purchase_orders')
             ->where('organization_id', $orgId)
-            ->whereIn('status', ['confirmed', 'completed'])
+            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
             ->when($this->purchaseCreatorFilter(), fn ($q, $v) => $q->whereIn('created_by', $v))
             ->groupBy('company_id')
-            ->select('company_id', DB::raw('SUM(total_amount) as total'))
-            ->pluck('total', 'company_id');
-
-        $payments = DB::table('payments')
-            ->where('organization_id', $orgId)
-            ->where('type', 'payment')
-            ->groupBy('company_id')
-            ->select('company_id', DB::raw('SUM(amount) as total'))
-            ->pluck('total', 'company_id');
+            ->select(
+                'company_id',
+                DB::raw('SUM(total_amount) as total_purchases'),
+                DB::raw('SUM(paid_amount) as total_payments'),
+                DB::raw('SUM(total_amount - paid_amount) as balance'),
+            )
+            ->havingRaw('SUM(total_amount - paid_amount) > 0')
+            ->get();
 
         $names = DB::table('companies')
             ->where('organization_id', $orgId)
-            ->whereIn('id', $purchases->keys()->filter())
+            ->whereIn('id', $rows->pluck('company_id')->filter())
             ->pluck('name', 'id');
 
-        $data = $purchases->map(function ($total, $companyId) use ($payments, $names) {
-            $totalPurchases = (float) $total;
-            $totalPayments = (float) ($payments[$companyId] ?? 0);
-
-            return [
-                'company_name' => $names[$companyId] ?? '',
-                'total_purchases' => $totalPurchases,
-                'total_payments' => $totalPayments,
-                'balance' => $totalPurchases - $totalPayments,
-            ];
-        })->values()->filter(fn ($r) => $r['balance'] > 0)->values();
+        $data = $rows->map(fn ($r) => [
+            'company_name' => $names[$r->company_id] ?? '',
+            'total_purchases' => (float) $r->total_purchases,
+            'total_payments' => (float) $r->total_payments,
+            'balance' => (float) $r->balance,
+        ])->values();
 
         return response()->json(['data' => $data, 'total_balance' => $data->sum('balance')]);
     }
@@ -915,6 +904,7 @@ class ReportController extends Controller
                 'sort_id' => $p->id,
                 'row' => [
                     'id' => 'P'.$p->id,
+                    'payment_id' => $p->id,
                     'payment_number' => $p->payment_number,
                     'payment_date' => $p->payment_date->toDateString(),
                     'description' => $p->description,

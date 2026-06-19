@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\PaymentType;
 use App\Models\Payment;
+use App\Models\PaymentAllocation;
 use App\Models\PurchaseOrder;
 use App\Models\SalesOrder;
 use App\Models\TourPaymentRequest;
@@ -18,6 +19,10 @@ class PaymentService
 
     public function create(array $data): Payment
     {
+        // VND: làm tròn số tiền phiếu về đồng nguyên
+        $data['amount'] = round((float) $data['amount']);
+        $data['created_by'] ??= auth()->id();
+
         return DB::transaction(function () use ($data) {
             // Lock order và kiểm tra lại remaining bên trong transaction
             if (! empty($data['reference_type']) && ! empty($data['reference_id'])) {
@@ -28,7 +33,8 @@ class PaymentService
                     $remaining = $totalAmount < 0
                         ? abs($totalAmount) - abs($paidAmount)
                         : $totalAmount - $paidAmount;
-                    if ((float) $data['amount'] > $remaining + 0.01) {
+                    // VND: so sánh ở mức đồng nguyên, tránh chặn nhầm khi dữ liệu cũ còn đồng lẻ
+                    if (round((float) $data['amount']) > round($remaining)) {
                         throw ValidationException::withMessages([
                             'amount' => [sprintf(
                                 'Số tiền thanh toán (%s₫) vượt quá số tiền còn nợ (%s₫).',
@@ -44,7 +50,7 @@ class PaymentService
             $isApplyAdvance = ($data['is_advance'] ?? false) && ! empty($data['reference_id']);
             if ($isApplyAdvance && ! empty($data['company_id'])) {
                 $available = $this->availableAdvanceLocked((int) $data['company_id'], (int) $data['organization_id']);
-                if ((float) $data['amount'] > $available + 0.01) {
+                if (round((float) $data['amount']) > round($available)) {
                     throw ValidationException::withMessages([
                         'amount' => [sprintf(
                             'Số tiền áp dụng (%s₫) vượt quá tiền thu trước còn lại (%s₫).',
@@ -94,12 +100,69 @@ class PaymentService
     }
 
     /**
+     * Thu gộp: tạo MỘT phiếu thu cho cả cục tiền + MỘT bút toán (Nợ TM/TGNH / Có 131),
+     * rồi phân bổ cho nhiều đơn qua payment_allocations. Dễ tra soát (1 dòng tiền = 1 phiếu).
+     *
+     * @param  array<string, mixed>  $data  company_id, account_id, payment_date, amount, description, organization_id
+     * @param  array<int, array{sales_order_id: int, amount: float}>  $allocations
+     */
+    public function createReceiptWithAllocations(array $data, array $allocations): Payment
+    {
+        $data['amount'] = round((float) $data['amount']);
+
+        return DB::transaction(function () use ($data, $allocations) {
+            $payment = Payment::create([
+                'payment_number' => $this->generatePaymentNumber(PaymentType::Receipt->value),
+                'created_by' => auth()->id(),
+                'group_id' => $data['group_id'] ?? null,
+                'type' => PaymentType::Receipt->value,
+                'company_id' => $data['company_id'],
+                'account_id' => $data['account_id'],
+                'payment_date' => $data['payment_date'],
+                'amount' => $data['amount'],
+                'description' => $data['description'] ?? 'Thu gộp nhiều đơn',
+                'organization_id' => $data['organization_id'],
+                'is_advance' => false,
+                'status' => 'approved',
+            ]);
+
+            // Một bút toán cho cả cục: Nợ TM/TGNH / Có 131
+            $desc = $payment->description ?? $payment->payment_number;
+            $this->journalEntryService->create(
+                description: $desc,
+                entryDate: $payment->payment_date->toDateString(),
+                reference: $payment,
+                lines: [
+                    ['account_code' => $payment->account->code, 'description' => $desc, 'debit' => (float) $payment->amount, 'credit' => 0],
+                    ['account_code' => '131', 'description' => $desc, 'debit' => 0, 'credit' => (float) $payment->amount],
+                ],
+            );
+
+            // Ghi phân bổ + đồng bộ trạng thái thanh toán từng đơn
+            foreach ($allocations as $alloc) {
+                PaymentAllocation::create([
+                    'payment_id' => $payment->id,
+                    'sales_order_id' => $alloc['sales_order_id'],
+                    'organization_id' => $data['organization_id'],
+                    'amount' => $alloc['amount'],
+                ]);
+                SalesOrder::find($alloc['sales_order_id'])?->syncPaymentStatus();
+            }
+
+            return $payment->load(['company', 'account']);
+        });
+    }
+
+    /**
      * Tạo phiếu chi ở trạng thái nháp — chưa sinh bút toán, chờ giám đốc duyệt.
      *
      * @param  array<string, mixed>  $data
      */
     public function createDraft(array $data): Payment
     {
+        $data['amount'] = round((float) $data['amount']);
+        $data['created_by'] ??= auth()->id();
+
         return DB::transaction(function () use ($data) {
             return Payment::create([
                 'payment_number' => $this->generatePaymentNumber($data['type']),
@@ -188,37 +251,90 @@ class PaymentService
         return max(0, (float) $paid - (float) $applied);
     }
 
+    /**
+     * Tiền khách có sẵn (credit) = tiền chưa phân bổ của MỌI phiếu thu chưa gắn đơn cụ thể
+     * (mô hình unapplied cash): Σ phiếu thu (reference null).amount − Σ allocations − (dữ liệu cũ: is_advance đã áp có reference).
+     */
     public function availableAdvance(int $companyId, int $orgId): float
     {
-        $received = Payment::where('company_id', $companyId)
+        return $this->computeAvailableAdvance($companyId, $orgId, false);
+    }
+
+    private function availableAdvanceLocked(int $companyId, int $orgId): float
+    {
+        return $this->computeAvailableAdvance($companyId, $orgId, true);
+    }
+
+    private function computeAvailableAdvance(int $companyId, int $orgId, bool $lock): float
+    {
+        $poolQuery = Payment::where('company_id', $companyId)
             ->where('organization_id', $orgId)
             ->where('type', PaymentType::Receipt)
-            ->where('is_advance', true)
-            ->whereNull('reference_id')
+            ->whereNull('reference_id');
+
+        if ($lock) {
+            $poolQuery->lockForUpdate();
+        }
+
+        $pool = (float) $poolQuery->sum('amount');
+
+        // Đã phân bổ vào đơn từ các phiếu thu chưa gắn đơn
+        $allocated = (float) PaymentAllocation::where('organization_id', $orgId)
+            ->whereHas('payment', fn ($q) => $q->where('company_id', $companyId)
+                ->where('type', PaymentType::Receipt)
+                ->whereNull('reference_id'))
             ->sum('amount');
 
-        $applied = Payment::where('company_id', $companyId)
+        // Tương thích ngược: phiếu is_advance kiểu cũ áp thẳng vào đơn (có reference_id)
+        $legacyApplied = (float) Payment::where('company_id', $companyId)
             ->where('organization_id', $orgId)
             ->where('type', PaymentType::Receipt)
             ->where('is_advance', true)
             ->whereNotNull('reference_id')
             ->sum('amount');
 
-        return max(0, (float) $received - (float) $applied);
+        return max(0, $pool - $allocated - $legacyApplied);
     }
 
-    private function availableAdvanceLocked(int $companyId, int $orgId): float
+    /**
+     * Áp tiền khách có sẵn (credit) vào đơn bán bằng phân bổ — KHÔNG tạo phiếu thu/bút toán mới.
+     * Rút FIFO từ phần chưa phân bổ của mọi phiếu thu chưa gắn đơn (gồm cả thu trước lẫn dư từ thu gộp).
+     */
+    public function applyAdvanceToOrder(int $companyId, int $orderId, float $amount, int $orgId): void
     {
-        $base = Payment::where('company_id', $companyId)
-            ->where('organization_id', $orgId)
-            ->where('type', PaymentType::Receipt)
-            ->where('is_advance', true)
-            ->lockForUpdate();
+        DB::transaction(function () use ($companyId, $orderId, $amount, $orgId) {
+            $left = round($amount);
 
-        $received = (clone $base)->whereNull('reference_id')->sum('amount');
-        $applied = (clone $base)->whereNotNull('reference_id')->sum('amount');
+            $receipts = Payment::where('company_id', $companyId)
+                ->where('organization_id', $orgId)
+                ->where('type', PaymentType::Receipt)
+                ->whereNull('reference_id')
+                ->orderBy('payment_date')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
 
-        return max(0, (float) $received - (float) $applied);
+            foreach ($receipts as $rc) {
+                if ($left <= 0) {
+                    break;
+                }
+                $used = (float) PaymentAllocation::where('payment_id', $rc->id)->sum('amount');
+                $remaining = round((float) $rc->amount - $used);
+                if ($remaining <= 0) {
+                    continue;
+                }
+                $alloc = min($remaining, $left);
+                PaymentAllocation::create([
+                    'payment_id' => $rc->id,
+                    'sales_order_id' => $orderId,
+                    'organization_id' => $orgId,
+                    'amount' => $alloc,
+                ]);
+                $left -= $alloc;
+            }
+
+            SalesOrder::find($orderId)?->syncPaymentStatus();
+        });
     }
 
     /**

@@ -72,7 +72,10 @@ class CompanyController extends Controller
 
     public function stats(Company $company): JsonResponse
     {
+        // Chỉ tính đơn đã lên sổ (xác nhận/đang giao/hoàn thành) — bỏ nháp/đã hủy,
+        // để Doanh thu/Đã thu/Còn nợ nhất quán với báo cáo công nợ & receivable_balance.
         $agg = fn ($relation) => $company->{$relation}()
+            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
             ->selectRaw('COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total, COALESCE(SUM(paid_amount),0) as paid')
             ->first();
 

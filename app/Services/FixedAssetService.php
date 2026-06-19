@@ -25,13 +25,14 @@ class FixedAssetService
             if ($asset->account_id) {
                 $account = $asset->account;
                 $desc = "Mua tài sản: {$asset->name}";
+                $cost = round((float) $asset->cost); // VND: đồng nguyên
                 $this->journalEntryService->create(
                     description: $desc,
                     entryDate: $asset->purchase_date->toDateString(),
                     reference: $asset,
                     lines: [
-                        ['account_code' => $asset->asset_account_code, 'description' => $desc, 'debit' => (float) $asset->cost, 'credit' => 0],
-                        ['account_code' => $account->code, 'description' => $desc, 'debit' => 0, 'credit' => (float) $asset->cost],
+                        ['account_code' => $asset->asset_account_code, 'description' => $desc, 'debit' => $cost, 'credit' => 0],
+                        ['account_code' => $account->code, 'description' => $desc, 'debit' => 0, 'credit' => $cost],
                     ],
                 );
             }
@@ -54,7 +55,7 @@ class FixedAssetService
 
             $depreciation = FixedAssetDepreciation::firstOrCreate(
                 ['fixed_asset_id' => $asset->id, 'year' => $year],
-                ['organization_id' => $asset->organization_id, 'amount' => $asset->annualDepreciation()],
+                ['organization_id' => $asset->organization_id, 'amount' => $asset->depreciationForYear($year)],
             );
 
             if ($depreciation->journal_entry_id) {

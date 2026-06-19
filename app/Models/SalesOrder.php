@@ -85,6 +85,14 @@ class SalesOrder extends Model
         return $this->morphMany(Payment::class, 'reference');
     }
 
+    /**
+     * Phần được phân bổ từ các phiếu thu gộp (1 phiếu → nhiều đơn).
+     */
+    public function allocations(): HasMany
+    {
+        return $this->hasMany(PaymentAllocation::class);
+    }
+
     public function warehouseExports(): BelongsToMany
     {
         return $this->belongsToMany(WarehouseExport::class, 'warehouse_export_orders');

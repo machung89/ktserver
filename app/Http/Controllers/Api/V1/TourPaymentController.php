@@ -174,8 +174,10 @@ class TourPaymentController extends Controller
             ->lockForUpdate()
             ->sum('amount');
 
+        $validated['amount'] = round((float) $validated['amount']); // VND: đồng nguyên
+
         $remaining = (float) $service->cost - (float) $service->paid_amount - (float) $pendingLocked;
-        if ((float) $validated['amount'] > $remaining + 0.01) {
+        if (round((float) $validated['amount']) > round($remaining)) {
             throw ValidationException::withMessages([
                 'amount' => [sprintf(
                     'Số tiền (%s₫) vượt quá số còn có thể lên lệnh (%s₫).',
@@ -271,6 +273,7 @@ class TourPaymentController extends Controller
                         6, '0', STR_PAD_LEFT
                     ),
                     'organization_id' => $this->orgId(),
+                    'created_by' => Auth::id(),
                     'type' => 'payment',
                     'company_id' => $tourPayment->supplier_id,
                     'account_id' => null,
@@ -316,6 +319,7 @@ class TourPaymentController extends Controller
                         6, '0', STR_PAD_LEFT
                     ),
                     'organization_id' => $this->orgId(),
+                    'created_by' => Auth::id(),
                     'type' => 'payment',
                     'company_id' => $tourPayment->supplier_id,
                     'account_id' => null,
@@ -347,6 +351,7 @@ class TourPaymentController extends Controller
             } else {
                 $payment = $this->paymentService->createDraft([
                     'organization_id' => $this->orgId(),
+                    'created_by' => Auth::id(),
                     'type' => 'payment',
                     'company_id' => $tourPayment->supplier_id,
                     'account_id' => null,

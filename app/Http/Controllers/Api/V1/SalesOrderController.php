@@ -368,7 +368,7 @@ class SalesOrderController extends Controller
             abort_unless(in_array($salesOrder->created_by, $viewableIds), 403, 'Bạn không có quyền xem đơn hàng này.');
         }
 
-        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product.recipe.ingredients.ingredient:id,name,unit,code', 'items.warehouse', 'payments.account', 'returnOrder', 'originalOrder', 'promotion']));
+        return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product.recipe.ingredients.ingredient:id,name,unit,code', 'items.warehouse', 'payments.account', 'allocations.payment.account', 'returnOrder', 'originalOrder', 'promotion']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource

@@ -8,6 +8,7 @@ use App\Models\Organization;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
 class OrganizationController extends Controller
@@ -47,12 +48,44 @@ class OrganizationController extends Controller
             'settings.enable_employee_profit' => ['boolean'],
             'settings.business_mode' => ['nullable', Rule::in(['retail', 'restaurant', 'tour'])],
             'settings.tour_number_prefix' => ['nullable', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]*$/'],
+            'settings.print_title' => ['nullable', 'string', 'max:100'],
+            'settings.print_footer' => ['nullable', 'string', 'max:500'],
+            'settings.print_show_qr' => ['boolean'],
+            'settings.print_show_signature' => ['boolean'],
             'bank_id' => ['nullable', 'exists:banks,id'],
             'bank_account_name' => ['nullable', 'string', 'max:255'],
             'bank_account_number' => ['nullable', 'string', 'max:50'],
         ]);
 
         $org->update($validated);
+
+        return response()->json(['data' => $this->format($org->load('bank'))]);
+    }
+
+    public function uploadLogo(Request $request): JsonResponse
+    {
+        $request->validate(['logo' => ['required', 'image', 'max:2048']]);
+
+        $org = Organization::findOrFail($this->orgId());
+
+        if ($org->logo_url && Storage::disk('public')->exists($org->logo_url)) {
+            Storage::disk('public')->delete($org->logo_url);
+        }
+
+        $path = $request->file('logo')->store('logos/'.$org->id, 'public');
+        $org->update(['logo_url' => $path]);
+
+        return response()->json(['data' => $this->format($org->load('bank'))]);
+    }
+
+    public function deleteLogo(): JsonResponse
+    {
+        $org = Organization::findOrFail($this->orgId());
+
+        if ($org->logo_url && Storage::disk('public')->exists($org->logo_url)) {
+            Storage::disk('public')->delete($org->logo_url);
+        }
+        $org->update(['logo_url' => null]);
 
         return response()->json(['data' => $this->format($org->load('bank'))]);
     }
@@ -138,6 +171,7 @@ class OrganizationController extends Controller
                 'tour_id',
                 DB::table('tours')->where('organization_id', $orgId)->pluck('id')
             )->delete();
+            DB::table('tour_extra_revenues')->where('organization_id', $orgId)->delete();
             DB::table('tours')->where('organization_id', $orgId)->delete();
 
             // Tài sản cố định
@@ -166,7 +200,8 @@ class OrganizationController extends Controller
             )->delete();
             DB::table('purchase_orders')->where('organization_id', $orgId)->delete();
 
-            // Thanh toán
+            // Thanh toán (xóa phân bổ trước, rồi phiếu thu/chi)
+            DB::table('payment_allocations')->where('organization_id', $orgId)->delete();
             DB::table('payments')->where('organization_id', $orgId)->delete();
 
             // Bút toán
@@ -189,6 +224,14 @@ class OrganizationController extends Controller
             DB::table('promotion_products')->whereIn('promotion_id', $promotionIds)->delete();
             DB::table('promotion_categories')->whereIn('promotion_id', $promotionIds)->delete();
             DB::table('promotions')->where('organization_id', $orgId)->delete();
+
+            // Trả bàn nhà hàng về trống (đơn đã xóa, tránh bàn kẹt trạng thái "có khách")
+            DB::table('restaurant_tables')->where('organization_id', $orgId)
+                ->where('status', '!=', 'available')
+                ->update(['status' => 'available']);
+
+            // Nhật ký hoạt động (đã trỏ tới các bản ghi giao dịch vừa xóa)
+            DB::table('activity_logs')->where('organization_id', $orgId)->delete();
         });
 
         return response()->json(['message' => 'Đã xóa toàn bộ dữ liệu giao dịch']);
@@ -207,7 +250,10 @@ class OrganizationController extends Controller
             'phone' => $org->phone,
             'email' => $org->email,
             'website' => $org->website,
-            'logo_url' => $org->logo_url,
+            // URL tuyệt đối trỏ backend để hiển thị/in được ở cửa sổ in
+            'logo_url' => $org->logo_url
+                ? (str_starts_with($org->logo_url, 'http') ? $org->logo_url : rtrim(config('app.url'), '/').'/storage/'.$org->logo_url)
+                : null,
             'print_template' => $org->print_template ?? 'default',
             'bank_id' => $org->bank_id,
             'bank_account_name' => $org->bank_account_name,
@@ -231,6 +277,11 @@ class OrganizationController extends Controller
                 'enable_employee_profit' => (bool) $org->setting('enable_employee_profit', false),
                 'business_mode' => $org->setting('business_mode', 'retail'),
                 'tour_number_prefix' => $org->setting('tour_number_prefix', 'TOUR'),
+                // Mẫu in tùy chỉnh
+                'print_title' => $org->setting('print_title', ''),
+                'print_footer' => $org->setting('print_footer', ''),
+                'print_show_qr' => (bool) $org->setting('print_show_qr', true),
+                'print_show_signature' => (bool) $org->setting('print_show_signature', true),
             ],
         ];
     }

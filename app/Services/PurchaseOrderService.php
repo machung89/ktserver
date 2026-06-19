@@ -48,20 +48,24 @@ class PurchaseOrderService
                 description: "Nhập hàng theo phiếu {$order->order_number}",
             );
 
-            // Bút toán: Nợ 156 / Có 331
+            // VND: làm tròn về đồng nguyên; 331 (Có) = 156 + 1331 (Nợ) để luôn cân tuyệt đối
+            $goods = round((float) $order->subtotal);
+            $vat = round((float) $order->tax_amount);
+
+            // Bút toán: Nợ 156 (+ Nợ 1331 thuế) / Có 331
             $lines = [];
             $lines[] = [
                 'account_code' => '156',
                 'description' => "Nhập hàng hóa - {$order->order_number}",
-                'debit' => (float) $order->subtotal,
+                'debit' => $goods,
                 'credit' => 0,
             ];
 
-            if ((float) $order->tax_amount > 0) {
+            if ($vat > 0) {
                 $lines[] = [
                     'account_code' => '1331',
                     'description' => "Thuế GTGT đầu vào - {$order->order_number}",
-                    'debit' => (float) $order->tax_amount,
+                    'debit' => $vat,
                     'credit' => 0,
                 ];
             }
@@ -70,7 +74,7 @@ class PurchaseOrderService
                 'account_code' => '331',
                 'description' => "Phải trả NCC - {$order->order_number}",
                 'debit' => 0,
-                'credit' => (float) $order->total_amount,
+                'credit' => $goods + $vat,
             ];
 
             $this->journalEntryService->create(

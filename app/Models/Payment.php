@@ -9,9 +9,10 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 
-#[Fillable(['payment_number', 'type', 'company_id', 'account_id', 'to_account_id', 'expense_account_id', 'payment_date', 'amount', 'description', 'organization_id', 'reference_type', 'reference_id', 'is_advance', 'status'])]
+#[Fillable(['payment_number', 'group_id', 'type', 'company_id', 'account_id', 'to_account_id', 'expense_account_id', 'payment_date', 'amount', 'description', 'organization_id', 'reference_type', 'reference_id', 'is_advance', 'status', 'created_by'])]
 class Payment extends Model
 {
     /** @use HasFactory<PaymentFactory> */
@@ -55,5 +56,18 @@ class Payment extends Model
     public function reference(): MorphTo
     {
         return $this->morphTo();
+    }
+
+    public function createdBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /**
+     * Phân bổ phiếu thu cho nhiều đơn bán (thu gộp).
+     */
+    public function allocations(): HasMany
+    {
+        return $this->hasMany(PaymentAllocation::class);
     }
 }

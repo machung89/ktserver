@@ -27,6 +27,13 @@ class PaymentResource extends JsonResource
             'account' => new AccountResource($this->whenLoaded('account')),
             'to_account' => new AccountResource($this->whenLoaded('toAccount')),
             'expense_account' => new AccountResource($this->whenLoaded('expenseAccount')),
+            'created_by' => $this->created_by,
+            'creator_name' => $this->whenLoaded('createdBy', fn () => $this->createdBy?->name),
+            'allocations' => $this->whenLoaded('allocations', fn () => $this->allocations->map(fn ($a) => [
+                'sales_order_id' => $a->sales_order_id,
+                'order_number' => $a->salesOrder?->order_number,
+                'amount' => $a->amount,
+            ])->values()),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

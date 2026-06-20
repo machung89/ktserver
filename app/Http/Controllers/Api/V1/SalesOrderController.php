@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\SalesOrderItemResource;
 use App\Http\Resources\Api\V1\SalesOrderResource;
 use App\Models\Inventory;
+use App\Models\JournalEntry;
 use App\Models\Organization;
 use App\Models\Product;
 use App\Models\Promotion;
@@ -369,6 +370,40 @@ class SalesOrderController extends Controller
         }
 
         return new SalesOrderResource($salesOrder->load(['company', 'createdBy', 'restaurantTable', 'items.product.recipe.ingredients.ingredient:id,name,unit,code', 'items.warehouse', 'payments.account', 'allocations.payment.account', 'returnOrder', 'originalOrder', 'promotion']));
+    }
+
+    /**
+     * Sửa nhanh người tạo / ngày bán — cho phép ở mọi trạng thái (điều chỉnh hành chính).
+     * Đồng bộ ngày hạch toán của bút toán liên quan để báo cáo nhất quán.
+     */
+    public function quickUpdate(Request $request, SalesOrder $salesOrder): SalesOrderResource
+    {
+        $validated = $request->validate([
+            'order_date' => ['sometimes', 'date'],
+            'created_by' => ['sometimes', 'integer', Rule::exists('users', 'id')->where('organization_id', $this->orgId())],
+        ]);
+
+        // Phạm vi quyền: không có "xem tất cả" thì chỉ sửa được đơn của mình/người được phép xem,
+        // và không được đổi người tạo.
+        /** @var User $user */
+        $user = Auth::user();
+        if (! $user->hasPermission('sales.view_all')) {
+            $viewableIds = array_merge([$user->id], $user->getViewableUserIds());
+            abort_unless(in_array($salesOrder->created_by, $viewableIds), 403, 'Bạn không có quyền sửa đơn hàng này.');
+            unset($validated['created_by']);
+        }
+
+        DB::transaction(function () use ($salesOrder, $validated) {
+            $salesOrder->update($validated);
+
+            if (array_key_exists('order_date', $validated)) {
+                JournalEntry::where('reference_type', SalesOrder::class)
+                    ->where('reference_id', $salesOrder->id)
+                    ->update(['entry_date' => $validated['order_date']]);
+            }
+        });
+
+        return new SalesOrderResource($salesOrder->fresh()->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'allocations.payment.account', 'returnOrder', 'originalOrder', 'promotion']));
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource

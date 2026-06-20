@@ -51,6 +51,12 @@ class RolePermissionSeeder extends Seeder
                 ['sales.confirm', 'Xác nhận đơn bán'],
                 ['sales.cancel', 'Hủy đơn bán'],
             ],
+            'warehouse_exports' => [
+                ['warehouse_exports.view', 'Xem phiếu xuất kho'],
+                ['warehouse_exports.create', 'Tạo phiếu xuất kho'],
+                ['warehouse_exports.edit', 'Sửa phiếu xuất kho'],
+                ['warehouse_exports.delete', 'Xóa phiếu xuất kho'],
+            ],
             'payments' => [
                 ['payments.view', 'Xem thu chi'],
                 ['payments.create', 'Tạo phiếu thu chi'],

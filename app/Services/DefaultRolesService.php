@@ -32,6 +32,7 @@ class DefaultRolesService
                     'assets.view', 'assets.create',
                     'journal.view', 'journal.create',
                     'reports.view', 'reports.view_profit',
+                    'warehouse_exports.view',
                 ],
             ],
             [
@@ -55,6 +56,7 @@ class DefaultRolesService
                     'warehouses.view', 'inventory.view', 'inventory.adjust',
                     'purchases.view', 'purchases.view_all', 'purchases.confirm',
                     'sales.view', 'sales.confirm',
+                    'warehouse_exports.view', 'warehouse_exports.create', 'warehouse_exports.edit', 'warehouse_exports.delete',
                 ],
             ],
         ];

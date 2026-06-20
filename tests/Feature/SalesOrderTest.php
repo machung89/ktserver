@@ -8,9 +8,12 @@ use App\Models\Company;
 use App\Models\Inventory;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
+use App\Models\Permission;
 use App\Models\Product;
 use App\Models\Recipe;
+use App\Models\Role;
 use App\Models\SalesOrder;
+use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\DefaultAccountsService;
 use App\Services\PaymentService;
@@ -187,6 +190,65 @@ class SalesOrderTest extends TestCase
         $this->getJson('/api/v1/sales')
             ->assertOk()
             ->assertJsonStructure(['data' => [['id', 'order_number', 'status', 'total_amount']]]);
+    }
+
+    #[TestDox('Sửa nhanh người tạo & ngày bán; đồng bộ ngày bút toán')]
+    public function test_quick_update_creator_and_date(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        $other = User::factory()->create(['organization_id' => $this->organization->id]);
+        $newDate = '2026-01-15';
+
+        $this->patchJson("/api/v1/sales/{$order['id']}/quick-update", [
+            'order_date' => $newDate,
+            'created_by' => $other->id,
+        ])->assertOk()->assertJsonPath('data.created_by', $other->id);
+
+        $this->assertDatabaseHas('sales_orders', [
+            'id' => $order['id'],
+            'created_by' => $other->id,
+            'order_date' => $newDate,
+        ]);
+
+        // Ngày hạch toán của bút toán liên quan cũng được đồng bộ
+        $this->assertDatabaseHas('journal_entries', [
+            'reference_type' => SalesOrder::class,
+            'reference_id' => $order['id'],
+            'entry_date' => $newDate,
+        ]);
+    }
+
+    #[TestDox('Sửa nhanh không nhận người tạo ngoài tổ chức')]
+    public function test_quick_update_rejects_foreign_user(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $foreign = User::factory()->create(); // tổ chức khác
+
+        $this->patchJson("/api/v1/sales/{$order['id']}/quick-update", [
+            'created_by' => $foreign->id,
+        ])->assertUnprocessable();
+    }
+
+    #[TestDox('Sửa nhanh tôn trọng phạm vi xem: NV không có "xem tất cả" không sửa được đơn người khác')]
+    public function test_quick_update_respects_view_scope(): void
+    {
+        // Đơn do admin tạo
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+
+        // Nhân viên chỉ có sales.view + sales.edit (không có sales.view_all)
+        $view = Permission::create(['name' => 'sales.view', 'display_name' => 'Xem đơn bán', 'module' => 'sales']);
+        $edit = Permission::create(['name' => 'sales.edit', 'display_name' => 'Sửa đơn bán', 'module' => 'sales']);
+        $role = Role::create(['organization_id' => $this->organization->id, 'name' => 'staff', 'display_name' => 'NV bán']);
+        $role->permissions()->attach([$view->id, $edit->id]);
+        $staff = User::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true]);
+        $staff->roles()->attach($role->id);
+        $this->actingAs($staff, 'sanctum');
+
+        // Không xem được đơn của admin → không sửa nhanh được
+        $this->patchJson("/api/v1/sales/{$order['id']}/quick-update", ['order_date' => '2026-02-02'])
+            ->assertForbidden();
     }
 
     #[TestDox('Bán combo: giá vốn = tổng giá vốn thành phần, trừ kho thành phần (không trừ combo)')]

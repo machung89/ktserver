@@ -11,12 +11,14 @@ use App\Models\ProductCategory;
 use App\Models\PurchaseOrderItem;
 use App\Models\SalesOrderItem;
 use App\Services\ActivityLogService;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class ProductController extends Controller
@@ -339,8 +341,14 @@ class ProductController extends Controller
                 if ($shouldSyncUnit2 && $unit2Name !== '' && $unit2Factor > 0) {
                     $this->syncUnits($product, [['name' => $unit2Name, 'conversion_factor' => $unit2Factor]]);
                 }
+            } catch (QueryException $e) {
+                $msg = $e->getMessage();
+                $reason = (str_contains($msg, 'products_code_unique') || str_contains($msg, "for key 'code'"))
+                    ? 'Mã sản phẩm đã tồn tại'
+                    : (str_contains($msg, 'Duplicate entry') ? 'Trùng dữ liệu (mã vạch/đơn vị...)' : 'Lỗi dữ liệu: '.Str::limit($msg, 120));
+                $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => $reason];
             } catch (\Throwable $e) {
-                $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Lỗi không xác định'];
+                $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Lỗi: '.Str::limit($e->getMessage(), 150)];
             }
         }
 

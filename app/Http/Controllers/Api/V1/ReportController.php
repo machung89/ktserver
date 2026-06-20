@@ -11,6 +11,7 @@ use App\Models\Organization;
 use App\Models\Payment;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -347,7 +348,7 @@ class ReportController extends Controller
 
     private function canViewProfit(): bool
     {
-        /** @var User|null $user */
+        /** @var User $user */
         $user = auth()->user();
 
         return $user?->hasPermission('reports.view_profit') ?? false;
@@ -397,6 +398,7 @@ class ReportController extends Controller
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->when($request->employee_id, fn ($q, $v) => $q->where('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->when($request->category_id, fn ($q, $v) => $q->where('p.category_id', $v))
@@ -465,6 +467,7 @@ class ReportController extends Controller
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->when($request->employee_id, fn ($q, $v) => $q->where('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy(DB::raw('DATE(so.order_date)'))
@@ -519,6 +522,7 @@ class ReportController extends Controller
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->when($request->employee_id, fn ($q, $v) => $q->where('so.created_by', $v))
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
             ->groupBy(DB::raw("DATE_FORMAT(so.order_date, '%Y-%m')"))
@@ -574,6 +578,7 @@ class ReportController extends Controller
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->when($request->employee_id, fn ($q, $v) => $q->where('so.created_by', $v))
             ->where('soi.is_return', false)
             ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
             ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
@@ -617,6 +622,197 @@ class ReportController extends Controller
                 'gross_profit' => round($rows->sum('profit'), 2),
             ] : []),
         ]);
+    }
+
+    public function purchases(Request $request): JsonResponse
+    {
+        return match ($request->get('group_by', 'product')) {
+            'supplier' => $this->purchasesGroupedBySupplier($request),
+            'date' => $this->purchasesGroupedByDate($request),
+            'month' => $this->purchasesGroupedByMonth($request),
+            'category' => $this->purchasesGroupedByCategory($request),
+            default => $this->purchasesGroupedByProduct($request),
+        };
+    }
+
+    /**
+     * Áp các bộ lọc chung cho báo cáo nhập hàng lên query (chỉ đơn đã xác nhận/hoàn thành).
+     */
+    private function applyPurchaseFilters(Builder $query, Request $request): Builder
+    {
+        return $query
+            ->where('po.organization_id', $this->orgId())
+            ->whereIn('po.status', ['confirmed', 'completed'])
+            ->when($this->purchaseCreatorFilter(), fn ($q, $v) => $q->whereIn('po.created_by', $v))
+            ->when($request->supplier_id, fn ($q, $v) => $q->where('po.company_id', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('po.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('po.order_date', '<=', $v));
+    }
+
+    /**
+     * @param  Collection<int, array<string, mixed>>  $rows
+     */
+    private function purchaseReportResponse($rows): JsonResponse
+    {
+        return response()->json([
+            'data' => $rows,
+            'total_quantity' => round($rows->sum('quantity'), 3),
+            'total_amount' => round($rows->sum('amount'), 2),
+            'total_with_tax' => round($rows->sum('total'), 2),
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $base
+     */
+    private function purchaseRow(array $base, object $r): array
+    {
+        $amount = round((float) $r->amount, 2);
+        $total = round((float) $r->total, 2);
+
+        return array_merge($base, [
+            'order_count' => (int) $r->order_count,
+            'quantity' => round((float) $r->quantity, 3),
+            'amount' => $amount,
+            'tax' => round($total - $amount, 2),
+            'total' => $total,
+        ]);
+    }
+
+    private function purchasesGroupedByProduct(Request $request): JsonResponse
+    {
+        $query = DB::table('purchase_order_items as poi')
+            ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id')
+            ->leftJoin('products as p', 'p.id', '=', 'poi.product_id')
+            ->leftJoin('product_categories as cat', 'cat.id', '=', 'p.category_id')
+            ->leftJoin('product_categories as parent', 'parent.id', '=', 'cat.parent_id');
+
+        $rows = $this->applyPurchaseFilters($query, $request)
+            ->when($request->category_id, fn ($q, $v) => $q->where('p.category_id', $v))
+            ->groupBy('poi.product_id', 'p.code', 'p.name', 'p.unit', 'cat.name', 'parent.name')
+            ->select([
+                'poi.product_id',
+                DB::raw("COALESCE(p.code, '') as product_code"),
+                DB::raw("COALESCE(p.name, '') as product_name"),
+                DB::raw("COALESCE(p.unit, '') as unit"),
+                'cat.name as cat_name',
+                'parent.name as parent_name',
+                DB::raw('SUM(poi.quantity) as quantity'),
+                DB::raw('COUNT(DISTINCT po.id) as order_count'),
+                DB::raw('SUM(poi.amount) as amount'),
+                DB::raw('SUM(poi.amount * (1 + poi.tax_rate / 100)) as total'),
+            ])
+            ->orderByDesc(DB::raw('SUM(poi.amount)'))
+            ->get()
+            ->map(function ($r) {
+                $catLabel = $r->cat_name
+                    ? ($r->parent_name ? $r->parent_name.' › '.$r->cat_name : $r->cat_name)
+                    : null;
+
+                return $this->purchaseRow([
+                    'product_id' => $r->product_id,
+                    'product_code' => $r->product_code,
+                    'product_name' => $r->product_name,
+                    'unit' => $r->unit,
+                    'category' => $catLabel,
+                ], $r);
+            })
+            ->filter(fn ($r) => $r['quantity'] != 0 || $r['amount'] != 0)
+            ->values();
+
+        return $this->purchaseReportResponse($rows);
+    }
+
+    private function purchasesGroupedBySupplier(Request $request): JsonResponse
+    {
+        $query = DB::table('purchase_order_items as poi')
+            ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id')
+            ->leftJoin('companies as c', 'c.id', '=', 'po.company_id');
+
+        $rows = $this->applyPurchaseFilters($query, $request)
+            ->groupBy('po.company_id', 'c.name')
+            ->select([
+                'po.company_id',
+                DB::raw("COALESCE(c.name, '(Không rõ)') as company_name"),
+                DB::raw('COUNT(DISTINCT po.id) as order_count'),
+                DB::raw('SUM(poi.quantity) as quantity'),
+                DB::raw('SUM(poi.amount) as amount'),
+                DB::raw('SUM(poi.amount * (1 + poi.tax_rate / 100)) as total'),
+            ])
+            ->orderByDesc(DB::raw('SUM(poi.amount)'))
+            ->get()
+            ->map(fn ($r) => $this->purchaseRow([
+                'company_id' => $r->company_id,
+                'company_name' => $r->company_name,
+            ], $r));
+
+        return $this->purchaseReportResponse($rows);
+    }
+
+    private function purchasesGroupedByDate(Request $request): JsonResponse
+    {
+        $query = DB::table('purchase_order_items as poi')
+            ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id');
+
+        $rows = $this->applyPurchaseFilters($query, $request)
+            ->groupBy(DB::raw('DATE(po.order_date)'))
+            ->select([
+                DB::raw('DATE(po.order_date) as date'),
+                DB::raw('COUNT(DISTINCT po.id) as order_count'),
+                DB::raw('SUM(poi.quantity) as quantity'),
+                DB::raw('SUM(poi.amount) as amount'),
+                DB::raw('SUM(poi.amount * (1 + poi.tax_rate / 100)) as total'),
+            ])
+            ->orderBy(DB::raw('DATE(po.order_date)'))
+            ->get()
+            ->map(fn ($r) => $this->purchaseRow(['date' => $r->date], $r));
+
+        return $this->purchaseReportResponse($rows);
+    }
+
+    private function purchasesGroupedByMonth(Request $request): JsonResponse
+    {
+        $query = DB::table('purchase_order_items as poi')
+            ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id');
+
+        $rows = $this->applyPurchaseFilters($query, $request)
+            ->groupBy(DB::raw("DATE_FORMAT(po.order_date, '%Y-%m')"))
+            ->select([
+                DB::raw("DATE_FORMAT(po.order_date, '%Y-%m') as month"),
+                DB::raw('COUNT(DISTINCT po.id) as order_count'),
+                DB::raw('SUM(poi.quantity) as quantity'),
+                DB::raw('SUM(poi.amount) as amount'),
+                DB::raw('SUM(poi.amount * (1 + poi.tax_rate / 100)) as total'),
+            ])
+            ->orderBy(DB::raw("DATE_FORMAT(po.order_date, '%Y-%m')"))
+            ->get()
+            ->map(fn ($r) => $this->purchaseRow(['month' => $r->month], $r));
+
+        return $this->purchaseReportResponse($rows);
+    }
+
+    private function purchasesGroupedByCategory(Request $request): JsonResponse
+    {
+        $query = DB::table('purchase_order_items as poi')
+            ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id')
+            ->join('products as p', 'p.id', '=', 'poi.product_id')
+            ->leftJoin('product_categories as pc', 'pc.id', '=', 'p.category_id')
+            ->leftJoin('product_categories as parent_pc', 'parent_pc.id', '=', 'pc.parent_id');
+
+        $rows = $this->applyPurchaseFilters($query, $request)
+            ->groupBy('pc.id', 'pc.name', 'parent_pc.name')
+            ->select([
+                DB::raw("COALESCE(CASE WHEN parent_pc.name IS NOT NULL THEN CONCAT(parent_pc.name, ' › ', pc.name) ELSE pc.name END, '(Chưa phân loại)') as category_name"),
+                DB::raw('COUNT(DISTINCT po.id) as order_count'),
+                DB::raw('SUM(poi.quantity) as quantity'),
+                DB::raw('SUM(poi.amount) as amount'),
+                DB::raw('SUM(poi.amount * (1 + poi.tax_rate / 100)) as total'),
+            ])
+            ->orderByDesc(DB::raw('SUM(poi.amount)'))
+            ->get()
+            ->map(fn ($r) => $this->purchaseRow(['category_name' => $r->category_name], $r));
+
+        return $this->purchaseReportResponse($rows);
     }
 
     public function soldProducts(Request $request): JsonResponse
@@ -818,7 +1014,13 @@ class ReportController extends Controller
 
         $accountQuery = Account::where(fn ($q) => $q->where('code', 'like', '111%')->orWhere('code', 'like', '112%'));
         if ($request->filled('account_id')) {
-            $accountQuery->where('id', $request->account_id);
+            // Chọn tài khoản cha → gồm cả tài khoản con (mã con bắt đầu bằng mã cha theo chuẩn VAS)
+            $selected = Account::find($request->account_id);
+            if ($selected) {
+                $accountQuery->where('code', 'like', $selected->code.'%');
+            } else {
+                $accountQuery->where('id', $request->account_id);
+            }
         }
         $accountIds = $accountQuery->pluck('id');
 

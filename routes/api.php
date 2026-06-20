@@ -203,6 +203,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('sales/shopee-import', [ShopeeImportController::class, 'import'])->middleware('permission:sales.create');
         Route::post('sales/tiktok-import', [TiktokImportController::class, 'import'])->middleware('permission:sales.create');
         Route::put('sales/{salesOrder}', [SalesOrderController::class, 'update'])->middleware('permission:sales.edit');
+        Route::patch('sales/{salesOrder}/quick-update', [SalesOrderController::class, 'quickUpdate'])->middleware('permission:sales.edit');
         Route::post('sales/bulk-confirm', [SalesOrderController::class, 'bulkConfirm'])->middleware('permission:sales.confirm');
         Route::post('sales/bulk-confirm-by-code', [SalesOrderController::class, 'bulkConfirmByCode'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/confirm', [SalesOrderController::class, 'confirm'])->middleware('permission:sales.confirm');
@@ -253,6 +254,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('reports/receivables', [ReportController::class, 'receivables']);
             Route::get('reports/payables', [ReportController::class, 'payables']);
             Route::get('reports/sales', [ReportController::class, 'sales']);
+            Route::get('reports/purchases', [ReportController::class, 'purchases']);
             Route::get('reports/sold-products', [ReportController::class, 'soldProducts']);
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance']);
             Route::get('reports/balance-sheet', [ReportController::class, 'balanceSheet']);

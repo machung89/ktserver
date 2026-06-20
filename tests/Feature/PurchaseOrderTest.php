@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Enums\CompanyType;
 use App\Models\Company;
 use App\Models\Product;
+use App\Models\PurchaseOrder;
 use App\Models\Warehouse;
 use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
@@ -132,5 +133,33 @@ class PurchaseOrderTest extends TestCase
         $this->getJson('/api/v1/purchases')
             ->assertOk()
             ->assertJsonStructure(['data' => [['id', 'order_number', 'status', 'total_amount']]]);
+    }
+
+    #[TestDox('Báo cáo nhập hàng chỉ tính đơn đã xác nhận/hoàn thành')]
+    public function test_purchase_report_counts_confirmed_orders(): void
+    {
+        // Đơn nháp — không được tính
+        $this->postJson('/api/v1/purchases', $this->validPayload())->assertCreated();
+
+        // Đơn đã xác nhận — được tính (10 x 60.000 = 600.000)
+        $confirmed = $this->postJson('/api/v1/purchases', $this->validPayload())->json('data.id');
+        PurchaseOrder::withoutGlobalScopes()->where('id', $confirmed)->update(['status' => 'confirmed']);
+
+        $res = $this->getJson('/api/v1/reports/purchases?group_by=product')->assertOk()->json();
+        $this->assertEquals(600000, (float) $res['total_amount']);
+        $this->assertEquals(10, (float) $res['total_quantity']);
+        $this->assertCount(1, $res['data']);
+
+        // Lọc theo nhà cung cấp khác → không có dữ liệu
+        $other = Company::factory()->create([
+            'organization_id' => $this->organization->id,
+            'type' => CompanyType::Supplier,
+        ]);
+        $empty = $this->getJson("/api/v1/reports/purchases?supplier_id={$other->id}")->assertOk()->json();
+        $this->assertEquals(0, (float) $empty['total_amount']);
+
+        // Nhóm theo nhà cung cấp
+        $bySupplier = $this->getJson('/api/v1/reports/purchases?group_by=supplier')->assertOk()->json();
+        $this->assertEquals($this->supplier->id, $bySupplier['data'][0]['company_id']);
     }
 }

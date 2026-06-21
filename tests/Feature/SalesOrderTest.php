@@ -251,6 +251,87 @@ class SalesOrderTest extends TestCase
             ->assertForbidden();
     }
 
+    #[TestDox('Báo cáo doanh thu theo khách hàng')]
+    public function test_sales_report_grouped_by_customer(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        $res = $this->getJson('/api/v1/reports/sales?group_by=customer')->assertOk()->json();
+
+        $this->assertEquals(200000, (float) $res['total_revenue']);
+        $row = collect($res['data'])->firstWhere('company_id', $this->customer->id);
+        $this->assertNotNull($row);
+        $this->assertEquals($this->customer->name, $row['customer_name']);
+        $this->assertEquals(1, $row['order_count']);
+        $this->assertEquals(200000, (float) $row['revenue']);
+    }
+
+    #[TestDox('Thu hoàn ứng NCC: phiếu thu đối ứng 331 ghi Nợ 111 / Có 331')]
+    public function test_receipt_with_counter_account(): void
+    {
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+        $ap = Account::where('organization_id', $this->organization->id)->where('code', '331')->firstOrFail();
+
+        $p = $this->postJson('/api/v1/payments', [
+            'type' => 'receipt',
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'expense_account_id' => $ap->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 150000,
+            'description' => 'Thu hoàn ứng NCC',
+        ])->assertCreated()->json('data');
+
+        $credit331 = \DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->join('accounts as a', 'a.id', '=', 'l.account_id')
+            ->where('j.reference_type', Payment::class)->where('j.reference_id', $p['id'])
+            ->where('a.code', '331')->where('l.credit_amount', 150000)->exists();
+        $this->assertTrue($credit331, 'Phải có dòng Có 331 = 150.000');
+    }
+
+    #[TestDox('Chi trả lại tiền khách ứng trước: Nợ 131 / Có 111 và giảm quỹ ứng')]
+    public function test_refund_customer_advance_reduces_pool(): void
+    {
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+        $ar = Account::where('organization_id', $this->organization->id)->where('code', '131')->firstOrFail();
+        $svc = app(PaymentService::class);
+
+        // Khách ứng trước 500.000
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt',
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 500000,
+            'is_advance' => true,
+        ])->assertCreated();
+        $this->assertEquals(500000.0, $svc->availableAdvance($this->customer->id, $this->organization->id));
+
+        // Hoàn lại 200.000 (phiếu chi đối ứng 131)
+        $p = $this->postJson('/api/v1/payments', [
+            'type' => 'payment',
+            'company_id' => $this->customer->id,
+            'account_id' => $cash->id,
+            'expense_account_id' => $ar->id,
+            'payment_date' => now()->toDateString(),
+            'amount' => 200000,
+            'description' => 'Trả lại tiền khách ứng trước',
+        ])->assertCreated()->json('data');
+
+        // Quỹ ứng còn 300.000
+        $this->assertEquals(300000.0, $svc->availableAdvance($this->customer->id, $this->organization->id));
+
+        // Bút toán chi: Nợ 131 = 200.000
+        $debit131 = \DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->join('accounts as a', 'a.id', '=', 'l.account_id')
+            ->where('j.reference_type', Payment::class)->where('j.reference_id', $p['id'])
+            ->where('a.code', '131')->where('l.debit_amount', 200000)->exists();
+        $this->assertTrue($debit131, 'Phải có dòng Nợ 131 = 200.000');
+    }
+
     #[TestDox('Bán combo: giá vốn = tổng giá vốn thành phần, trừ kho thành phần (không trừ combo)')]
     public function test_combo_sale_cost_and_inventory(): void
     {

@@ -385,18 +385,55 @@ class JournalEntryTest extends TestCase
 
     // ── SỔ QUỸ ───────────────────────────────────────────────────────────────
 
-    #[TestDox('Bút toán thủ công có TK tiền (111) hiển thị trong sổ quỹ — tiền vào')]
-    public function test_manual_entry_with_cash_account_appears_in_cashbook_as_inflow(): void
+    /**
+     * Tạo bút toán thủ công có TK tiền trực tiếp (mô phỏng dữ liệu cũ trước khi chặn 111/112 ở API).
+     *
+     * @param  array<array{code: string, desc?: string, debit?: float, credit?: float}>  $lines
+     */
+    private function insertLegacyJournal(string $description, array $lines): void
     {
-        // Nợ 111 / Có 511 — thu tiền mặt 500,000
+        $entry = JournalEntry::create([
+            'entry_number' => 'BT'.uniqid(),
+            'entry_date' => now()->toDateString(),
+            'description' => $description,
+            'is_posted' => true,
+            'organization_id' => $this->organization->id,
+        ]);
+        foreach ($lines as $l) {
+            $acc = Account::where('organization_id', $this->organization->id)->where('code', $l['code'])->firstOrFail();
+            JournalEntryLine::create([
+                'journal_entry_id' => $entry->id,
+                'account_id' => $acc->id,
+                'description' => $l['desc'] ?? '',
+                'debit_amount' => $l['debit'] ?? 0,
+                'credit_amount' => $l['credit'] ?? 0,
+            ]);
+        }
+    }
+
+    #[TestDox('Bút toán thủ công không cho dùng TK tiền 111/112 (dùng Phiếu thu/chi)')]
+    public function test_manual_entry_rejects_cash_account(): void
+    {
         $this->postJson('/api/v1/journal-entries', [
             'entry_date' => now()->toDateString(),
-            'description' => 'Thu tiền khác bằng tiền mặt',
+            'description' => 'Thu tiền mặt',
             'lines' => [
-                ['account_code' => '111', 'description' => 'Tiền vào quỹ', 'debit' => 500000, 'credit' => 0],
+                ['account_code' => '111', 'description' => '', 'debit' => 500000, 'credit' => 0],
                 ['account_code' => '511', 'description' => '', 'debit' => 0, 'credit' => 500000],
             ],
-        ])->assertCreated();
+        ])->assertUnprocessable()->assertJsonValidationErrors('lines');
+
+        $this->assertDatabaseMissing('journal_entries', ['description' => 'Thu tiền mặt']);
+    }
+
+    #[TestDox('Bút toán có TK tiền (dữ liệu cũ) vẫn hiển thị trong sổ quỹ — tiền vào')]
+    public function test_manual_entry_with_cash_account_appears_in_cashbook_as_inflow(): void
+    {
+        // Dữ liệu cũ: Nợ 111 / Có 511 — thu tiền mặt 500,000
+        $this->insertLegacyJournal('Thu tiền khác bằng tiền mặt', [
+            ['code' => '111', 'desc' => 'Tiền vào quỹ', 'debit' => 500000],
+            ['code' => '511', 'credit' => 500000],
+        ]);
 
         $response = $this->getJson('/api/v1/reports/cashbook')->assertOk();
 
@@ -410,18 +447,14 @@ class JournalEntryTest extends TestCase
         $this->assertEquals(500000, (float) $response->json('total_thu'));
     }
 
-    #[TestDox('Bút toán thủ công chi tiền mặt hiển thị trong sổ quỹ — tiền ra')]
+    #[TestDox('Bút toán chi tiền mặt (dữ liệu cũ) vẫn hiển thị trong sổ quỹ — tiền ra')]
     public function test_manual_entry_cash_outflow_appears_in_cashbook(): void
     {
-        // Nợ 632 / Có 111 — chi tiền mặt 300,000
-        $this->postJson('/api/v1/journal-entries', [
-            'entry_date' => now()->toDateString(),
-            'description' => 'Chi phí khác bằng tiền mặt',
-            'lines' => [
-                ['account_code' => '632', 'description' => '', 'debit' => 300000, 'credit' => 0],
-                ['account_code' => '111', 'description' => 'Tiền ra quỹ', 'debit' => 0, 'credit' => 300000],
-            ],
-        ])->assertCreated();
+        // Dữ liệu cũ: Nợ 632 / Có 111 — chi tiền mặt 300,000
+        $this->insertLegacyJournal('Chi phí khác bằng tiền mặt', [
+            ['code' => '632', 'debit' => 300000],
+            ['code' => '111', 'desc' => 'Tiền ra quỹ', 'credit' => 300000],
+        ]);
 
         $response = $this->getJson('/api/v1/reports/cashbook')->assertOk();
 

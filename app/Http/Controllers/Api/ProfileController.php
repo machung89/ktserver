@@ -42,6 +42,7 @@ class ProfileController extends Controller
 
         $request->user()->update([
             'password' => Hash::make($request->password),
+            'must_change_password' => false,
         ]);
 
         return response()->json(['message' => 'Đã đổi mật khẩu thành công']);

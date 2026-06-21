@@ -339,6 +339,7 @@ class ReportController extends Controller
     {
         return match ($request->get('group_by', 'product')) {
             'employee' => $this->salesByEmployee($request),
+            'customer' => $this->salesGroupedByCustomer($request),
             'date' => $this->salesGroupedByDate($request),
             'month' => $this->salesGroupedByMonth($request),
             'category' => $this->salesGroupedByCategory($request),
@@ -488,6 +489,64 @@ class ReportController extends Controller
 
                 $row = [
                     'date' => $r->date,
+                    'order_count' => (int) $r->order_count,
+                    'revenue' => $revenue,
+                    'cost' => $cost,
+                    'profit' => $profit,
+                    'margin' => $revenue > 0 ? round($profit / $revenue * 100, 1) : 0,
+                    'standard_total' => $standardTotal,
+                    'employee_profit' => $standardTotal > 0 ? round($revenue - $standardTotal, 2) : null,
+                ];
+
+                return $showProfit ? $row : $this->stripProfitFields($row);
+            });
+
+        return response()->json([
+            'data' => $rows,
+            'total_revenue' => round($rows->sum('revenue'), 2),
+            ...($showProfit ? [
+                'total_cost' => round($rows->sum('cost'), 2),
+                'gross_profit' => round($rows->sum('profit'), 2),
+            ] : []),
+        ]);
+    }
+
+    private function salesGroupedByCustomer(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+        $showProfit = $this->canViewProfit();
+
+        $rows = DB::table('sales_orders as so')
+            ->leftJoin('sales_order_items as soi', function ($j) {
+                $j->on('soi.sales_order_id', '=', 'so.id')->where('soi.is_return', false);
+            })
+            ->leftJoin('companies as c', 'c.id', '=', 'so.company_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->when($this->salesCreatorFilter(), fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->when($request->employee_id, fn ($q, $v) => $q->where('so.created_by', $v))
+            ->when($request->from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
+            ->groupBy('so.company_id', 'c.name')
+            ->select([
+                'so.company_id',
+                DB::raw("COALESCE(c.name, '(Khách lẻ)') as customer_name"),
+                DB::raw('COUNT(DISTINCT so.id) as order_count'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
+                DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
+            ])
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
+            ->get()
+            ->map(function ($r) use ($showProfit) {
+                $revenue = round((float) $r->revenue, 2);
+                $cost = round((float) $r->cost, 2);
+                $profit = round($revenue - $cost, 2);
+                $standardTotal = round((float) $r->standard_total, 2);
+
+                $row = [
+                    'company_id' => $r->company_id,
+                    'customer_name' => $r->customer_name,
                     'order_count' => (int) $r->order_count,
                     'revenue' => $revenue,
                     'cost' => $cost,

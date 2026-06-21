@@ -12,6 +12,7 @@ use App\Services\JournalEntryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\ValidationException;
 
 class JournalEntryController extends Controller
 {
@@ -48,6 +49,18 @@ class JournalEntryController extends Controller
             'lines.*.debit' => ['required', 'numeric', 'min:0'],
             'lines.*.credit' => ['required', 'numeric', 'min:0'],
         ]);
+
+        // Tiền mặt/ngân hàng (111, 112) chỉ ghi nhận qua Phiếu thu/chi để biến động tiền đồng nhất một đầu mối.
+        $cashCodes = collect($validated['lines'])
+            ->pluck('account_code')
+            ->filter(fn ($c) => str_starts_with((string) $c, '111') || str_starts_with((string) $c, '112'))
+            ->unique()
+            ->values();
+        if ($cashCodes->isNotEmpty()) {
+            throw ValidationException::withMessages([
+                'lines' => ['Bút toán thủ công không được dùng tài khoản tiền mặt/ngân hàng ('.$cashCodes->implode(', ').'). Hãy tạo Phiếu thu/chi để ghi nhận biến động tiền.'],
+            ]);
+        }
 
         $entry = $this->journalEntryService->createManual(
             description: $validated['description'],

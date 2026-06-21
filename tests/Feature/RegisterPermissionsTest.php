@@ -46,6 +46,16 @@ class RegisterPermissionsTest extends TestCase
         $this->assertDatabaseHas('users', ['email' => 'owner@test.com']);
     }
 
+    #[TestDox('Đăng ký mới được dùng thử 30 ngày')]
+    public function test_register_sets_30_day_trial(): void
+    {
+        $this->postJson('/api/register', $this->registerPayload())->assertCreated();
+
+        $org = Organization::where('name', 'Công ty Test')->firstOrFail();
+        $this->assertNotNull($org->subscription_ends_at);
+        $this->assertEquals(now()->addDays(30)->toDateString(), $org->subscription_ends_at->toDateString());
+    }
+
     #[TestDox('Đăng ký mới tự seed đầy đủ bộ permissions toàn cục')]
     public function test_register_seeds_all_global_permissions(): void
     {

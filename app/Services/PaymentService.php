@@ -293,7 +293,14 @@ class PaymentService
             ->whereNotNull('reference_id')
             ->sum('amount');
 
-        return max(0, $pool - $allocated - $legacyApplied);
+        // Tiền đã hoàn trả lại cho khách (phiếu chi đối ứng 131) → giảm quỹ ứng còn lại
+        $refunded = (float) Payment::where('company_id', $companyId)
+            ->where('organization_id', $orgId)
+            ->where('type', PaymentType::Payment)
+            ->whereHas('expenseAccount', fn ($q) => $q->where('code', 'like', '131%'))
+            ->sum('amount');
+
+        return max(0, $pool - $allocated - $legacyApplied - $refunded);
     }
 
     /**
@@ -361,9 +368,13 @@ class PaymentService
                 return null;
             }
 
+            // Tài khoản đối ứng: mặc định 131 (thu của khách); cho phép chọn khác
+            // (thu hoàn ứng NCC 331, thu hoàn tạm ứng NV 141, thu khác 711/511…).
+            $counter = $payment->expense_account_id ? $payment->expenseAccount->code : '131';
+
             return [
                 ['account_code' => $account->code, 'description' => $desc, 'debit' => $amount, 'credit' => 0],
-                ['account_code' => '131', 'description' => $desc, 'debit' => 0, 'credit' => $amount],
+                ['account_code' => $counter, 'description' => $desc, 'debit' => 0, 'credit' => $amount],
             ];
         }
 

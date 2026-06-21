@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rules\Password;
 
 class EmployeeController extends Controller
@@ -30,7 +31,7 @@ class EmployeeController extends Controller
         $data = $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users',
-            'password' => ['required', Password::min(8)],
+            'password' => ['nullable', Password::min(8)],
             'phone' => 'required|string|max:20|unique:users',
             'department' => 'nullable|string|max:100',
             'position' => 'nullable|string|max:100',
@@ -39,9 +40,13 @@ class EmployeeController extends Controller
             'role_ids.*' => 'exists:roles,id',
         ]);
 
+        // Để trống mật khẩu → tự sinh; nhân viên buộc đổi mật khẩu ở lần đăng nhập đầu.
+        $plainPassword = ! empty($data['password']) ? $data['password'] : Str::password(10, true, true, false, false);
+
         $user = User::create([
             ...$data,
-            'password' => Hash::make($data['password']),
+            'password' => Hash::make($plainPassword),
+            'must_change_password' => true,
             'organization_id' => $this->orgId(),
         ]);
 
@@ -49,7 +54,11 @@ class EmployeeController extends Controller
             $user->roles()->sync($data['role_ids']);
         }
 
-        return response()->json(['data' => $this->format($user->load('roles'))], 201);
+        // Trả mật khẩu vừa sinh để quản trị viên gửi cho nhân viên (chỉ hiển thị một lần lúc tạo).
+        return response()->json([
+            'data' => $this->format($user->load('roles')),
+            'generated_password' => $plainPassword,
+        ], 201);
     }
 
     public function show(User $employee): JsonResponse

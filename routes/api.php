@@ -81,6 +81,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
                 'email' => $user->email,
                 'is_admin' => $isAdmin,
                 'is_super_admin' => (bool) $user->is_super_admin,
+                'must_change_password' => (bool) $user->must_change_password,
                 'permissions' => $permissions,
                 'subscription_ends_at' => $subEndsAt?->toDateString(),
                 'subscription_days_left' => $subEndsAt ? (int) now()->startOfDay()->diffInDays($subEndsAt, false) : null,

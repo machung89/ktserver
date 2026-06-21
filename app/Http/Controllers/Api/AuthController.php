@@ -41,6 +41,8 @@ class AuthController extends Controller
                 'tax_code' => $validated['company_tax_code'] ?? null,
                 'address' => $validated['company_address'] ?? null,
                 'settings' => ['business_mode' => $validated['business_mode']],
+                // Dùng thử 30 ngày kể từ ngày đăng ký
+                'subscription_ends_at' => now()->addDays(30)->toDateString(),
             ]);
 
             $user = User::create([
@@ -130,6 +132,7 @@ class AuthController extends Controller
             'name' => $user->name,
             'email' => $user->email,
             'position' => $user->position,
+            'must_change_password' => (bool) $user->must_change_password,
             'organization' => $user->organization ? [
                 'id' => $user->organization->id,
                 'name' => $user->organization->name,

@@ -43,6 +43,7 @@ class CompanyController extends Controller
     {
         $validated = $request->validate([
             'name' => ['required', 'string'],
+            'code' => ['nullable', 'string', 'max:50', Rule::unique('companies', 'code')->where('organization_id', $this->orgId())],
             'type' => ['required', Rule::enum(CompanyType::class)],
             'tax_code' => ['nullable', 'string', Rule::unique('companies', 'tax_code')->where('organization_id', $this->orgId())],
             'phone' => ['nullable', 'string'],
@@ -59,6 +60,7 @@ class CompanyController extends Controller
         ]);
 
         $validated['user_id'] ??= auth()->id();
+        $validated['code'] = ($validated['code'] ?? null) ?: Company::generateCode($this->orgId(), $validated['type']);
 
         $company = Company::create(array_merge($validated, ['organization_id' => $this->orgId()]));
 
@@ -102,6 +104,7 @@ class CompanyController extends Controller
     {
         $validated = $request->validate([
             'name' => ['sometimes', 'string'],
+            'code' => ['nullable', 'string', 'max:50', Rule::unique('companies', 'code')->ignore($company->id)->where('organization_id', $this->orgId())],
             'type' => ['sometimes', Rule::enum(CompanyType::class)],
             'tax_code' => ['nullable', 'string', Rule::unique('companies', 'tax_code')->ignore($company->id)->where('organization_id', $this->orgId())],
             'phone' => ['nullable', 'string'],
@@ -164,6 +167,12 @@ class CompanyController extends Controller
 
         foreach ($request->rows as $i => $row) {
             $rowNum = $i + 2;
+
+            // Bỏ qua cột loại → mặc định Khách hàng
+            if (empty($row['type'])) {
+                $row['type'] = CompanyType::Customer->value;
+            }
+
             $v = Validator::make($row, [
                 'name' => 'required|string',
                 'type' => ['required', Rule::enum(CompanyType::class)],
@@ -182,7 +191,7 @@ class CompanyController extends Controller
                 continue;
             }
 
-            $taxCode = $row['tax_code'] ?: null;
+            $taxCode = ($row['tax_code'] ?? null) ?: null;
             if ($taxCode && isset($existingTaxCodes[$taxCode])) {
                 $errors[] = ['row' => $rowNum, 'name' => $name, 'reason' => 'Mã số thuế đã tồn tại'];
 
@@ -193,13 +202,14 @@ class CompanyController extends Controller
                 Company::create([
                     'organization_id' => $orgId,
                     'name' => $name,
+                    'code' => ($row['code'] ?? null) ?: Company::generateCode($orgId, $row['type']),
                     'type' => $row['type'],
                     'tax_code' => $taxCode,
-                    'phone' => $row['phone'] ?: null,
-                    'email' => $row['email'] ?: null,
-                    'address' => $row['address'] ?: null,
-                    'city' => $row['city'] ?: null,
-                    'representative' => $row['representative'] ?: null,
+                    'phone' => ($row['phone'] ?? null) ?: null,
+                    'email' => ($row['email'] ?? null) ?: null,
+                    'address' => ($row['address'] ?? null) ?: null,
+                    'city' => ($row['city'] ?? null) ?: null,
+                    'representative' => ($row['representative'] ?? null) ?: null,
                     'is_active' => true,
                 ]);
                 $existingNames[strtolower($name)] = true;

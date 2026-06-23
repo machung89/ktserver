@@ -2,12 +2,18 @@
 
 namespace App\Models;
 
+use App\Models\Scopes\OwnedByOrganization;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphOne;
 
 class AccountTransfer extends Model
 {
+    protected static function booted(): void
+    {
+        static::addGlobalScope(new OwnedByOrganization);
+    }
+
     protected $fillable = [
         'organization_id',
         'transfer_number',

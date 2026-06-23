@@ -44,6 +44,29 @@ class EmployeePasswordTest extends TestCase
         ]);
     }
 
+    #[TestDox('Thêm nhân viên: tự sinh mã NV khi để trống')]
+    public function test_autogenerates_employee_code(): void
+    {
+        $this->postJson('/api/v1/employees', $this->payload())
+            ->assertCreated()
+            ->assertJsonPath('data.employee_code', 'NV0001');
+    }
+
+    #[TestDox('Thêm nhân viên: dùng mã NV nhập tay; chặn mã trùng trong tổ chức')]
+    public function test_custom_and_unique_employee_code(): void
+    {
+        $this->postJson('/api/v1/employees', $this->payload(['employee_code' => 'KT01']))
+            ->assertCreated()
+            ->assertJsonPath('data.employee_code', 'KT01');
+
+        // Trùng mã trong cùng tổ chức → 422
+        $this->postJson('/api/v1/employees', $this->payload([
+            'employee_code' => 'KT01',
+            'email' => 'nvb@test.com',
+            'phone' => '0900000002',
+        ]))->assertUnprocessable()->assertJsonValidationErrors('employee_code');
+    }
+
     #[TestDox('Đổi mật khẩu xóa cờ bắt buộc đổi (must_change_password)')]
     public function test_change_password_clears_flag(): void
     {

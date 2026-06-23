@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
 
 class EmployeeController extends Controller
@@ -30,6 +31,7 @@ class EmployeeController extends Controller
     {
         $data = $request->validate([
             'name' => 'required|string|max:255',
+            'employee_code' => ['nullable', 'string', 'max:50', Rule::unique('users', 'employee_code')->where('organization_id', $this->orgId())],
             'email' => 'required|email|unique:users',
             'password' => ['nullable', Password::min(8)],
             'phone' => 'required|string|max:20|unique:users',
@@ -45,6 +47,7 @@ class EmployeeController extends Controller
 
         $user = User::create([
             ...$data,
+            'employee_code' => ($data['employee_code'] ?? null) ?: $this->generateEmployeeCode(),
             'password' => Hash::make($plainPassword),
             'must_change_password' => true,
             'organization_id' => $this->orgId(),
@@ -70,6 +73,7 @@ class EmployeeController extends Controller
     {
         $data = $request->validate([
             'name' => 'sometimes|required|string|max:255',
+            'employee_code' => ['nullable', 'string', 'max:50', Rule::unique('users', 'employee_code')->where('organization_id', $this->orgId())->ignore($employee->id)],
             'email' => "sometimes|required|email|unique:users,email,{$employee->id}",
             'password' => ['nullable', Password::min(8)],
             'phone' => "sometimes|required|string|max:20|unique:users,phone,{$employee->id}",
@@ -114,12 +118,26 @@ class EmployeeController extends Controller
         return response()->json(null, 204);
     }
 
+    /**
+     * Sinh mã nhân viên kế tiếp theo tổ chức: NV0001, NV0002, …
+     */
+    private function generateEmployeeCode(): string
+    {
+        $max = User::where('employee_code', 'like', 'NV%')
+            ->get(['employee_code'])
+            ->map(fn ($u) => (int) substr((string) $u->employee_code, 2))
+            ->max() ?? 0;
+
+        return 'NV'.str_pad($max + 1, 4, '0', STR_PAD_LEFT);
+    }
+
     /** @return array<string, mixed> */
     private function format(User $user): array
     {
         return [
             'id' => $user->id,
             'name' => $user->name,
+            'employee_code' => $user->employee_code,
             'email' => $user->email,
             'phone' => $user->phone,
             'department' => $user->department,

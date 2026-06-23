@@ -14,6 +14,7 @@ class UserObserver
             'organization_id' => $user->organization_id,
             'user_id' => $user->id,
             'name' => $user->name,
+            'code' => $user->organization_id ? Company::generateCode($user->organization_id, CompanyType::Employee) : null,
             'type' => CompanyType::Employee,
             'email' => $user->email,
             'phone' => $user->phone,

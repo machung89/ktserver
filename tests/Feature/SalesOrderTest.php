@@ -10,6 +10,7 @@ use App\Models\Payment;
 use App\Models\PaymentAllocation;
 use App\Models\Permission;
 use App\Models\Product;
+use App\Models\Promotion;
 use App\Models\Recipe;
 use App\Models\Role;
 use App\Models\SalesOrder;
@@ -267,6 +268,35 @@ class SalesOrderTest extends TestCase
         $this->assertEquals(200000, (float) $row['revenue']);
     }
 
+    public function test_promotion_report_order_discount(): void
+    {
+        $promo = Promotion::create([
+            'organization_id' => $this->organization->id,
+            'name' => 'Giảm 10% toàn đơn',
+            'type' => 'order_discount',
+            'scope' => 'all',
+            'conditions' => [],
+            'is_active' => true,
+        ]);
+
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        SalesOrder::withoutGlobalScopes()->where('id', $order['id'])->update([
+            'promotion_id' => $promo->id,
+            'discount_amount' => 20000,
+        ]);
+
+        $res = $this->getJson('/api/v1/reports/promotions')->assertOk()->json();
+
+        $row = collect($res['data'])->firstWhere('id', $promo->id);
+        $this->assertNotNull($row);
+        $this->assertEquals('order_discount', $row['type']);
+        $this->assertEquals(1, $row['order_count']);
+        $this->assertEquals(20000, (float) $row['discount_total']);
+        $this->assertEquals(20000, (float) $res['total_discount']);
+    }
+
     #[TestDox('Thu hoàn ứng NCC: phiếu thu đối ứng 331 ghi Nợ 111 / Có 331')]
     public function test_receipt_with_counter_account(): void
     {
@@ -330,6 +360,38 @@ class SalesOrderTest extends TestCase
             ->where('j.reference_type', Payment::class)->where('j.reference_id', $p['id'])
             ->where('a.code', '131')->where('l.debit_amount', 200000)->exists();
         $this->assertTrue($debit131, 'Phải có dòng Nợ 131 = 200.000');
+    }
+
+    #[TestDox('Import đơn bán Excel: áp đúng chiết khấu + thuế, tạo đơn nháp')]
+    public function test_bulk_import_applies_tax_and_discount(): void
+    {
+        $res = $this->postJson('/api/v1/sales/import', [
+            'orders' => [[
+                'company_id' => $this->customer->id,
+                'order_date' => now()->toDateString(),
+                'items' => [[
+                    'product_id' => $this->product->id,
+                    'warehouse_id' => $this->warehouse->id,
+                    'quantity' => 2,
+                    'unit_price' => 100000,
+                    'discount_type' => 'percent',
+                    'discount_value' => 10,
+                    'tax_rate' => 8,
+                    'cost_price' => 60000,
+                ]],
+            ]],
+        ])->assertOk()->json();
+
+        $this->assertEquals(1, $res['success']);
+
+        $order = SalesOrder::where('company_id', $this->customer->id)->latest('id')->first();
+        // 2 × 100.000 = 200.000; −10% = 180.000; VAT 8% = 14.400; tổng 194.400
+        $this->assertEquals(180000, (float) $order->subtotal);
+        $this->assertEquals(14400, (float) $order->tax_amount);
+        $this->assertEquals(194400, (float) $order->total_amount);
+        $this->assertEquals('draft', $order->status->value);
+        // Giữ chỗ tồn kho (reserved) chứ chưa trừ tồn
+        $this->assertEquals(2.0, (float) Inventory::where(['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id])->value('reserved_quantity'));
     }
 
     #[TestDox('Bán combo: giá vốn = tổng giá vốn thành phần, trừ kho thành phần (không trừ combo)')]

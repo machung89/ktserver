@@ -9,6 +9,7 @@ use App\Models\Account;
 use App\Models\JournalEntryLine;
 use App\Models\Organization;
 use App\Models\Payment;
+use App\Models\Promotion;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
@@ -874,6 +875,119 @@ class ReportController extends Controller
         return $this->purchaseReportResponse($rows);
     }
 
+    /**
+     * Báo cáo hiệu quả khuyến mại theo kỳ.
+     * - Giảm giá đơn (order_discount): số đơn áp dụng + tổng giảm giá + doanh thu đơn áp dụng.
+     * - Mua X tặng Y (buy_x_get_y): số đơn + số lượng & giá trị (giá vốn) hàng tặng.
+     */
+    public function promotions(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+        $from = $request->from;
+        $to = $request->to;
+        $statuses = ['confirmed', 'shipping', 'completed'];
+
+        $promotions = Promotion::where('organization_id', $orgId)->get();
+
+        // Giảm giá cấp đơn: gom theo promotion_id
+        $orderStats = DB::table('sales_orders')
+            ->where('organization_id', $orgId)
+            ->whereNotNull('promotion_id')
+            ->whereIn('status', $statuses)
+            ->when($from, fn ($q, $v) => $q->where('order_date', '>=', $v))
+            ->when($to, fn ($q, $v) => $q->where('order_date', '<=', $v))
+            ->groupBy('promotion_id')
+            ->selectRaw('promotion_id, COUNT(*) as order_count, COALESCE(SUM(discount_amount),0) as discount_total, COALESCE(SUM(total_amount),0) as revenue')
+            ->get()
+            ->keyBy('promotion_id');
+
+        // Mua X tặng Y: thống kê hàng tặng (đơn giá 0) theo sản phẩm tặng
+        $promoGiftMap = $promotions->where('type', 'buy_x_get_y')
+            ->mapWithKeys(fn ($p) => [$p->id => $this->promoGiftIds($p)])
+            ->filter(fn ($ids) => ! empty($ids));
+        $allGiftIds = $promoGiftMap->flatten()->unique()->values()->all();
+
+        $giftStats = ! empty($allGiftIds)
+            ? DB::table('sales_order_items as soi')
+                ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+                ->where('so.organization_id', $orgId)
+                ->whereIn('so.status', $statuses)
+                ->whereIn('soi.product_id', $allGiftIds)
+                ->where('soi.unit_price', 0)
+                ->when($from, fn ($q, $v) => $q->where('so.order_date', '>=', $v))
+                ->when($to, fn ($q, $v) => $q->where('so.order_date', '<=', $v))
+                ->groupBy('soi.product_id')
+                ->selectRaw('soi.product_id, SUM(soi.quantity) as qty, SUM(soi.quantity * soi.cost_price) as value, COUNT(DISTINCT soi.sales_order_id) as order_count')
+                ->get()
+                ->keyBy('product_id')
+            : collect();
+
+        $rows = $promotions->map(function ($p) use ($orderStats, $promoGiftMap, $giftStats) {
+            $orderCount = 0;
+            $discountTotal = 0.0;
+            $revenue = 0.0;
+            $giftQty = 0.0;
+            $giftValue = 0.0;
+
+            $type = $p->type instanceof \BackedEnum ? $p->type->value : $p->type;
+
+            if ($type === 'order_discount') {
+                $s = $orderStats[$p->id] ?? null;
+                $orderCount = (int) ($s->order_count ?? 0);
+                $discountTotal = round((float) ($s->discount_total ?? 0));
+                $revenue = round((float) ($s->revenue ?? 0));
+            } elseif ($type === 'buy_x_get_y') {
+                foreach ($promoGiftMap[$p->id] ?? [] as $gid) {
+                    if (isset($giftStats[$gid])) {
+                        $giftQty += (float) $giftStats[$gid]->qty;
+                        $giftValue += (float) $giftStats[$gid]->value;
+                        $orderCount = max($orderCount, (int) $giftStats[$gid]->order_count);
+                    }
+                }
+                $giftValue = round($giftValue);
+            }
+
+            return [
+                'id' => $p->id,
+                'name' => $p->name,
+                'type' => $type,
+                'is_active' => (bool) $p->is_active,
+                'order_count' => $orderCount,
+                'discount_total' => $discountTotal,
+                'revenue' => $revenue,
+                'gift_qty' => round($giftQty, 3),
+                'gift_value' => $giftValue,
+            ];
+        })
+            ->filter(fn ($r) => $r['order_count'] > 0 || $r['discount_total'] > 0 || $r['gift_qty'] > 0)
+            ->values();
+
+        return response()->json([
+            'data' => $rows,
+            'total_orders' => (int) $rows->sum('order_count'),
+            'total_discount' => round($rows->sum('discount_total')),
+            'total_gift_value' => round($rows->sum('gift_value')),
+        ]);
+    }
+
+    /**
+     * Lấy danh sách sản phẩm tặng của 1 khuyến mại (hỗ trợ định dạng nhiều quy tắc lẫn cũ).
+     *
+     * @return array<int, int>
+     */
+    private function promoGiftIds(Promotion $promotion): array
+    {
+        $conditions = $promotion->conditions ?? [];
+
+        if (! empty($conditions['rules'])) {
+            return collect($conditions['rules'])->pluck('gift_product_id')->filter()->unique()->values()->all();
+        }
+
+        $id = $conditions['gift_product_id'] ?? null;
+
+        return $id ? [(int) $id] : [];
+    }
+
     public function soldProducts(Request $request): JsonResponse
     {
         $orgId = $this->orgId();
@@ -1233,16 +1347,21 @@ class ReportController extends Controller
             })
             ->get();
 
-        return $lines->map(function (JournalEntryLine $line) use ($accountIds) {
+        // Nạp tài khoản đối ứng theo lô (tránh N+1): 1 truy vấn cho mọi bút toán liên quan
+        $entryIds = $lines->pluck('journal_entry_id')->unique()->all();
+        $counterByEntry = JournalEntryLine::with('account')
+            ->whereIn('journal_entry_id', $entryIds)
+            ->whereNotIn('account_id', $accountIds->all())
+            ->get()
+            ->groupBy('journal_entry_id');
+
+        return $lines->map(function (JournalEntryLine $line) use ($counterByEntry) {
             $entry = $line->journalEntry;
             $thu = (float) $line->debit_amount;   // Nợ TK tiền = tiền vào
             $chi = (float) $line->credit_amount;  // Có TK tiền = tiền ra
 
             // Tài khoản đối ứng: dòng khác trong cùng bút toán, không thuộc TK tiền
-            $counter = JournalEntryLine::with('account')
-                ->where('journal_entry_id', $entry->id)
-                ->whereNotIn('account_id', $accountIds->all())
-                ->first();
+            $counter = $counterByEntry->get($line->journal_entry_id)?->first();
 
             return [
                 'date' => $entry->entry_date instanceof Carbon

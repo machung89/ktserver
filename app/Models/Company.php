@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['name', 'type', 'tax_code', 'phone', 'email', 'address', 'city', 'ward', 'representative', 'is_active', 'organization_id', 'user_id', 'bank_id', 'bank_account_name', 'bank_account_number'])]
+#[Fillable(['name', 'code', 'type', 'tax_code', 'phone', 'email', 'address', 'city', 'ward', 'representative', 'is_active', 'organization_id', 'user_id', 'bank_id', 'bank_account_name', 'bank_account_number'])]
 class Company extends Model
 {
     /** @use HasFactory<CompanyFactory> */
@@ -20,6 +20,29 @@ class Company extends Model
     protected static function booted(): void
     {
         static::addGlobalScope(new OwnedByOrganization);
+    }
+
+    /**
+     * Sinh mã đối tác tự động theo loại: Khách hàng=KH, Nhà cung cấp=NCC, Nhân viên=NV
+     * (mặc định KH cho "cả hai"/không rõ). Mỗi tiền tố một dãy số riêng: KH0001, NCC0001…
+     */
+    public static function generateCode(int $organizationId, string|CompanyType|null $type): string
+    {
+        $value = $type instanceof CompanyType ? $type->value : $type;
+        $prefix = match ($value) {
+            CompanyType::Supplier->value => 'NCC',
+            CompanyType::Employee->value => 'NV',
+            default => 'KH',
+        };
+
+        $max = static::withoutGlobalScopes()
+            ->where('organization_id', $organizationId)
+            ->where('code', 'like', $prefix.'%')
+            ->pluck('code')
+            ->map(fn ($c) => (int) substr((string) $c, strlen($prefix)))
+            ->max() ?? 0;
+
+        return $prefix.str_pad($max + 1, 4, '0', STR_PAD_LEFT);
     }
 
     protected function casts(): array

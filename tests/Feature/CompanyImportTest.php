@@ -77,4 +77,34 @@ class CompanyImportTest extends TestCase
         $this->assertEquals(0, $res['success']);
         $this->assertEquals(1, $res['failed']);
     }
+
+    #[TestDox('Import đối tác: mã trùng báo lỗi rõ ràng')]
+    public function test_import_rejects_duplicate_code(): void
+    {
+        $res = $this->postJson('/api/v1/companies/import', [
+            'rows' => [
+                ['name' => 'Đối tác A', 'type' => 'customer', 'code' => 'KH-FIX'],
+                ['name' => 'Đối tác B', 'type' => 'supplier', 'code' => 'KH-FIX'],
+            ],
+        ])->assertOk()->json();
+
+        $this->assertEquals(1, $res['success']);
+        $this->assertEquals(1, $res['failed']);
+        $this->assertStringContainsString('Mã đối tác đã tồn tại', $res['errors'][0]['reason']);
+    }
+
+    #[TestDox('Import đối tác: email sai định dạng được bỏ qua, dòng vẫn nhập')]
+    public function test_import_drops_invalid_email_but_keeps_row(): void
+    {
+        $res = $this->postJson('/api/v1/companies/import', [
+            'rows' => [
+                ['name' => 'KH email lỗi', 'type' => 'customer', 'email' => 'không-phải-email'],
+                ['name' => 'KH email tốt', 'type' => 'customer', 'email' => 'good@example.com'],
+            ],
+        ])->assertOk()->json();
+
+        $this->assertEquals(2, $res['success']);
+        $this->assertDatabaseHas('companies', ['name' => 'KH email lỗi', 'email' => null]);
+        $this->assertDatabaseHas('companies', ['name' => 'KH email tốt', 'email' => 'good@example.com']);
+    }
 }

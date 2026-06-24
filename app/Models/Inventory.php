@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Facades\DB;
 
-#[Fillable(['product_id', 'warehouse_id', 'quantity', 'avg_cost', 'reserved_quantity', 'min_quantity', 'organization_id'])]
+#[Fillable(['product_id', 'warehouse_id', 'quantity', 'avg_cost', 'stock_value', 'reserved_quantity', 'min_quantity', 'organization_id'])]
 class Inventory extends Model
 {
     /** @use HasFactory<InventoryFactory> */
@@ -26,6 +26,7 @@ class Inventory extends Model
         return [
             'quantity' => 'decimal:3',
             'avg_cost' => 'decimal:2',
+            'stock_value' => 'decimal:2',
             'reserved_quantity' => 'decimal:3',
             'min_quantity' => 'decimal:3',
         ];
@@ -48,6 +49,7 @@ class Inventory extends Model
             'organization_id' => $orgId,
             'quantity' => 0,
             'avg_cost' => 0,
+            'stock_value' => 0,
             'reserved_quantity' => 0,
             'min_quantity' => 0,
             'created_at' => now(),

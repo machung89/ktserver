@@ -513,17 +513,13 @@ class SalesOrderService
 
             foreach ($transactions as $transaction) {
                 foreach ($transaction->items as $txItem) {
-                    $currentAvgCost = (float) Inventory::where([
-                        'product_id' => $txItem->product_id,
-                        'warehouse_id' => $transaction->warehouse_id,
-                        'organization_id' => app('orgId'),
-                    ])->value('avg_cost');
-
+                    // Nhập lại đúng giá vốn đã ghi lúc xuất (txItem->unit_price)
+                    // → stock_value & avg_cost khớp với việc đảo bút toán Có 156.
                     $this->inventoryTransactionService->updateInventoryBalance(
                         $transaction->warehouse_id,
                         $txItem->product_id,
                         -(float) $txItem->quantity,
-                        $currentAvgCost,
+                        (float) $txItem->unit_price,
                     );
                 }
                 $transaction->items()->delete();
@@ -578,18 +574,13 @@ class SalesOrderService
                 foreach ($transactions as $transaction) {
                     foreach ($transaction->items as $txItem) {
                         // qty trong transaction là số âm (xuất kho), đảo lại = cộng vào kho.
-                        // Truyền avg_cost hiện tại để WAC không bị sai khi "nhập lại".
-                        $currentAvgCost = (float) Inventory::where([
-                            'product_id' => $txItem->product_id,
-                            'warehouse_id' => $transaction->warehouse_id,
-                            'organization_id' => app('orgId'),
-                        ])->value('avg_cost');
-
+                        // Nhập lại đúng giá vốn đã ghi lúc xuất (txItem->unit_price) để
+                        // stock_value & avg_cost khớp với việc đảo bút toán Có 156.
                         $this->inventoryTransactionService->updateInventoryBalance(
                             $transaction->warehouse_id,
                             $txItem->product_id,
-                            -(float) $txItem->quantity,   // âm → dương = nhập lại
-                            $currentAvgCost,              // giữ avg_cost ổn định
+                            -(float) $txItem->quantity,
+                            (float) $txItem->unit_price,
                         );
                     }
                     $transaction->items()->delete();

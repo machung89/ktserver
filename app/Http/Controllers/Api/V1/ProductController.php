@@ -82,6 +82,10 @@ class ProductController extends Controller
             'combo_components.*.unit' => ['nullable', 'string', 'max:50'],
         ]);
 
+        if (array_key_exists('standard_price', $validated) && $validated['standard_price'] === null) {
+            $validated['standard_price'] = 0;
+        }
+
         $product = Product::create(array_merge(
             collect($validated)->except(['units', 'combo_components'])->all(),
             ['organization_id' => $this->orgId()]
@@ -161,6 +165,10 @@ class ProductController extends Controller
             'combo_components.*.quantity' => ['required', 'numeric', 'min:0.0001'],
             'combo_components.*.unit' => ['nullable', 'string', 'max:50'],
         ]);
+
+        if (array_key_exists('standard_price', $validated) && $validated['standard_price'] === null) {
+            $validated['standard_price'] = 0;
+        }
 
         $product->update(collect($validated)->except(['units', 'combo_components'])->all());
 
@@ -308,9 +316,9 @@ class ProductController extends Controller
                     'unit' => trim($row['unit']),
                     'price' => (float) $row['price'],
                     'cost_price' => (float) $row['cost_price'],
-                    'standard_price' => isset($row['standard_price']) && $row['standard_price'] !== null && $row['standard_price'] !== '' ? (float) $row['standard_price'] : null,
-                    'barcode' => $row['barcode'] ?: null,
-                    'description' => $row['description'] ?: null,
+                    'standard_price' => isset($row['standard_price']) && $row['standard_price'] !== null && $row['standard_price'] !== '' ? (float) $row['standard_price'] : 0,
+                    'barcode' => ($row['barcode'] ?? null) ?: null,
+                    'description' => ($row['description'] ?? null) ?: null,
                     'category_id' => $categoryId,
                 ];
 
@@ -350,6 +358,16 @@ class ProductController extends Controller
             } catch (\Throwable $e) {
                 $errors[] = ['row' => $rowNum, 'code' => $code, 'reason' => 'Lỗi: '.Str::limit($e->getMessage(), 150)];
             }
+        }
+
+        if ($success > 0 || $updated > 0) {
+            $this->activityLog->log(
+                $orgId, Auth::id(),
+                'product_imported',
+                "Nhập khẩu sản phẩm: thêm mới {$success}, cập nhật {$updated}".(count($errors) > 0 ? ', lỗi '.count($errors) : ''),
+                null,
+                ['success' => $success, 'updated' => $updated, 'failed' => count($errors)],
+            );
         }
 
         return response()->json([

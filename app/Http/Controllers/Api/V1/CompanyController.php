@@ -161,6 +161,10 @@ class CompanyController extends Controller
             ->pluck('tax_code')
             ->flip()
             ->all();
+        $existingCodes = Company::whereNotNull('code')
+            ->pluck('code')
+            ->flip()
+            ->all();
 
         $success = 0;
         $errors = [];
@@ -198,21 +202,38 @@ class CompanyController extends Controller
                 continue;
             }
 
+            $code = ($row['code'] ?? null) ?: null;
+            if ($code && isset($existingCodes[$code])) {
+                $errors[] = ['row' => $rowNum, 'name' => $name, 'reason' => 'Mã đối tác đã tồn tại'];
+
+                continue;
+            }
+            if (! $code) {
+                $code = Company::generateCode($orgId, $row['type']);
+            }
+
+            // Email sai định dạng thì bỏ qua, không để cả dòng bị lỗi.
+            $email = ($row['email'] ?? null) ?: null;
+            if ($email && ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $email = null;
+            }
+
             try {
                 Company::create([
                     'organization_id' => $orgId,
                     'name' => $name,
-                    'code' => ($row['code'] ?? null) ?: Company::generateCode($orgId, $row['type']),
+                    'code' => $code,
                     'type' => $row['type'],
                     'tax_code' => $taxCode,
                     'phone' => ($row['phone'] ?? null) ?: null,
-                    'email' => ($row['email'] ?? null) ?: null,
+                    'email' => $email,
                     'address' => ($row['address'] ?? null) ?: null,
                     'city' => ($row['city'] ?? null) ?: null,
                     'representative' => ($row['representative'] ?? null) ?: null,
                     'is_active' => true,
                 ]);
                 $existingNames[strtolower($name)] = true;
+                $existingCodes[$code] = true;
                 if ($taxCode) {
                     $existingTaxCodes[$taxCode] = true;
                 }

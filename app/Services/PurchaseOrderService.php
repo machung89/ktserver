@@ -84,8 +84,76 @@ class PurchaseOrderService
                 lines: $lines,
             );
 
+            $this->postCogsVarianceForBackorder($order);
+
             return $order->fresh(['company', 'warehouse', 'items.product']);
         });
+    }
+
+    /**
+     * Kết chuyển chênh lệch giá vốn cho hàng "bán trước - nhập sau".
+     *
+     * Sau khi nhập kho, SP nào đã đủ tồn (≥ 0) mà giá vốn tạm tính lúc bán khác giá nhập thật
+     * sẽ còn một khoản chênh nằm trong giá trị tồn (stock_value ≠ quantity × avg_cost).
+     * Ghi 632/156 cho phần chênh đó rồi đưa stock_value về đúng WAC, để TK 156 không bị lệch.
+     */
+    private function postCogsVarianceForBackorder(PurchaseOrder $order): void
+    {
+        $orgId = app('orgId');
+        $variance = 0.0;
+        $processed = [];
+
+        foreach ($order->items as $item) {
+            if (in_array($item->product_id, $processed, true)) {
+                continue;
+            }
+            $processed[] = $item->product_id;
+
+            $inventory = Inventory::where([
+                'product_id' => $item->product_id,
+                'warehouse_id' => $order->warehouse_id,
+                'organization_id' => $orgId,
+            ])->lockForUpdate()->first();
+
+            // Còn âm → chưa lấp đủ, để lần nhập sau mới chốt
+            if (! $inventory || (float) $inventory->quantity < 0) {
+                continue;
+            }
+
+            $delta = $this->inventoryTransactionService->cogsVariance($inventory);
+            if (abs($delta) < 1) {
+                continue; // bỏ qua nhiễu làm tròn dưới 1 đồng
+            }
+
+            // Đã kết chuyển phần chênh → đưa giá trị tồn về đúng WAC
+            $inventory->update(['stock_value' => round((float) $inventory->quantity * (float) $inventory->avg_cost, 2)]);
+            $variance += $delta;
+        }
+
+        $variance = round($variance, 2);
+        if (abs($variance) < 1) {
+            return;
+        }
+
+        $desc = "Kết chuyển chênh lệch giá vốn (bán trước - nhập sau) - {$order->order_number}";
+
+        // Giá nhập thật > giá vốn tạm → ghi tăng giá vốn (Nợ 632 / Có 156); ngược lại đảo chiều.
+        $lines = $variance > 0
+            ? [
+                ['account_code' => '632', 'description' => $desc, 'debit' => $variance, 'credit' => 0],
+                ['account_code' => '156', 'description' => $desc, 'debit' => 0, 'credit' => $variance],
+            ]
+            : [
+                ['account_code' => '156', 'description' => $desc, 'debit' => -$variance, 'credit' => 0],
+                ['account_code' => '632', 'description' => $desc, 'debit' => 0, 'credit' => -$variance],
+            ];
+
+        $this->journalEntryService->create(
+            description: $desc,
+            entryDate: $order->order_date->toDateString(),
+            reference: $order,
+            lines: $lines,
+        );
     }
 
     /**
@@ -98,6 +166,17 @@ class PurchaseOrderService
      */
     public function revertToDraft(PurchaseOrder $order): PurchaseOrder
     {
+        // Chặn nếu đơn đã phát sinh kết chuyển chênh lệch giá vốn (bán trước - nhập sau):
+        // việc này đã điều chỉnh WAC và giá trị tồn của các SP khác → không thể đảo sạch tự động.
+        $hasCogsVariance = JournalEntry::where('reference_type', PurchaseOrder::class)
+            ->where('reference_id', $order->id)
+            ->whereHas('lines.account', fn ($q) => $q->where('code', '632'))
+            ->exists();
+
+        if ($hasCogsVariance) {
+            throw ValidationException::withMessages(['status' => ['Không thể hoàn về nháp: đơn đã kết chuyển chênh lệch giá vốn hàng bán trước - nhập sau. Vui lòng điều chỉnh thủ công.']]);
+        }
+
         return DB::transaction(function () use ($order) {
             $order = PurchaseOrder::with('items')->lockForUpdate()->find($order->id);
 
@@ -136,8 +215,8 @@ class PurchaseOrderService
                     $this->inventoryTransactionService->updateInventoryBalance(
                         $transaction->warehouse_id,
                         $txItem->product_id,
-                        -(float) $txItem->quantity, // đảo ngược: trừ lại số đã nhập
-                        0,                           // avg_cost không điều chỉnh khi xuất
+                        -(float) $txItem->quantity,     // đảo ngược: trừ lại số đã nhập
+                        (float) $txItem->unit_price,    // trừ đúng giá trị đã ghi vào stock_value (avg_cost không đổi khi xuất)
                     );
                 }
                 $transaction->items()->delete();

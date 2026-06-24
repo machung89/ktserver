@@ -68,6 +68,60 @@ class ProductTest extends TestCase
         ]);
     }
 
+    #[TestDox('Import trùng mã chỉ cập nhật các trường được tích')]
+    public function test_bulk_import_updates_only_ticked_fields(): void
+    {
+        $this->makeProduct([
+            'code' => 'SP-IMP',
+            'name' => 'Tên cũ',
+            'price' => 100000,
+            'cost_price' => 60000,
+            'barcode' => 'OLD-BAR',
+        ]);
+
+        $row = [
+            'code' => 'SP-IMP',
+            'name' => 'Tên mới',
+            'unit' => 'cái',
+            'price' => 250000,
+            'cost_price' => 80000,
+            'barcode' => 'NEW-BAR',
+        ];
+
+        // Chỉ tích "price" => chỉ giá bán được cập nhật, các trường khác giữ nguyên.
+        $this->postJson('/api/v1/products/import', [
+            'rows' => [$row],
+            'update_existing' => true,
+            'update_fields' => ['price'],
+        ])->assertOk()->assertJsonPath('updated', 1)->assertJsonPath('success', 0);
+
+        $this->assertDatabaseHas('products', [
+            'code' => 'SP-IMP',
+            'name' => 'Tên cũ',
+            'price' => 250000,
+            'cost_price' => 60000,
+            'barcode' => 'OLD-BAR',
+        ]);
+    }
+
+    #[TestDox('Import trùng mã nhưng không bật cập nhật thì bỏ qua')]
+    public function test_bulk_import_skips_duplicate_when_update_disabled(): void
+    {
+        $this->makeProduct(['code' => 'SP-SKIP', 'name' => 'Giữ nguyên', 'price' => 100000]);
+
+        $this->postJson('/api/v1/products/import', [
+            'rows' => [[
+                'code' => 'SP-SKIP', 'name' => 'Không đổi', 'unit' => 'cái',
+                'price' => 999000, 'cost_price' => 5000,
+            ]],
+            'update_existing' => false,
+        ])->assertOk()->assertJsonPath('updated', 0)->assertJsonPath('failed', 1);
+
+        $this->assertDatabaseHas('products', [
+            'code' => 'SP-SKIP', 'name' => 'Giữ nguyên', 'price' => 100000,
+        ]);
+    }
+
     #[TestDox('Không thể tạo sản phẩm trùng mã')]
     public function test_cannot_create_duplicate_code(): void
     {

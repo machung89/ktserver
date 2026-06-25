@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\InvoiceStatus;
 use App\Enums\OrderStatus;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
@@ -44,11 +45,18 @@ class SalesOrderController extends Controller
         $canViewAll = $user->hasPermission('sales.view_all');
         $createdByFilter = $canViewAll ? null : array_merge([Auth::id()], $user->getViewableUserIds());
 
-        $orders = SalesOrder::with(['company', 'createdBy', 'restaurantTable', 'returnOrder'])
+        $orders = SalesOrder::with(['company', 'createdBy', 'shipper', 'restaurantTable', 'returnOrder'])
             ->withExists('warehouseExports')
             ->when($createdByFilter, fn ($q) => $q->whereIn('created_by', $createdByFilter))
             ->when($request->created_by, fn ($q, $v) => $q->where('created_by', $v))
             ->when($request->status, fn ($q, $v) => $q->where('status', $v))
+            ->when($request->filled('statuses'), function ($q) use ($request) {
+                $statuses = array_filter(explode(',', $request->statuses));
+                if ($statuses) {
+                    $q->whereIn('status', $statuses);
+                }
+            })
+            ->when($request->boolean('only_returns'), fn ($q) => $q->whereNotNull('original_order_id'))
             ->when($request->company_id, fn ($q, $v) => $q->where('company_id', $v))
             ->when($request->search, function ($q, $v) {
                 $q->where(function ($q) use ($v) {
@@ -64,6 +72,12 @@ class SalesOrderController extends Controller
                 $statuses = array_filter(explode(',', $request->payment_status));
                 if ($statuses) {
                     $q->whereIn('payment_status', $statuses);
+                }
+            })
+            ->when($request->filled('invoice_status'), function ($q) use ($request) {
+                $statuses = array_filter(explode(',', $request->invoice_status));
+                if ($statuses) {
+                    $q->whereIn('invoice_status', $statuses);
                 }
             })
             ->latest()
@@ -90,6 +104,8 @@ class SalesOrderController extends Controller
             ->whereIn('payment_status', ['unpaid', 'partial'])
             ->count();
 
+        $returns = (clone $base)->whereNotNull('original_order_id')->count();
+
         return response()->json([
             'all' => (int) (clone $base)->count(),
             'draft' => $counts['draft'] ?? 0,
@@ -98,6 +114,7 @@ class SalesOrderController extends Controller
             'completed' => $counts['completed'] ?? 0,
             'cancelled' => $counts['cancelled'] ?? 0,
             'debt' => (int) $debt,
+            'returns' => (int) $returns,
         ]);
     }
 
@@ -121,6 +138,7 @@ class SalesOrderController extends Controller
             'items.*.quantity' => ['required', 'numeric', $isReturnOrder ? 'max:-0.001' : 'min:0.001'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.cost_price' => ['nullable', 'numeric', 'min:0'],
+            'items.*.standard_price' => ['nullable', 'numeric', 'min:0'],
             'items.*.discount_type' => ['nullable', 'in:percent,fixed'],
             'items.*.discount_value' => ['nullable', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
@@ -239,6 +257,7 @@ class SalesOrderController extends Controller
                 $order = SalesOrder::create([
                     'order_number' => $this->generateOrderNumber(),
                     'status' => OrderStatus::Draft,
+                    'invoice_status' => InvoiceStatus::NotIssued,
                     'organization_id' => $orgId,
                     'company_id' => $validated['company_id'] ?? null,
                     'restaurant_table_id' => $validated['restaurant_table_id'] ?? null,
@@ -280,7 +299,10 @@ class SalesOrderController extends Controller
                     $taxRate = (float) ($item['tax_rate'] ?? 0);
                     $subtotal += $amount;
                     $taxAmount += round($amount * $taxRate / 100);
-                    $itemStandardPrice = (float) ($standardPrices[$item['product_id']] ?? 0);
+                    // Đơn trả hàng: chia giá theo ĐƠN GỐC (gửi lên); đơn bán thường lấy theo sản phẩm.
+                    $itemStandardPrice = $isReturnOrder
+                        ? (float) ($item['standard_price'] ?? 0)
+                        : (float) ($standardPrices[$item['product_id']] ?? 0);
                     if ($itemStandardPrice > 0) {
                         $standardTotal += (float) $item['quantity'] * $itemStandardPrice;
                     } else {
@@ -356,6 +378,12 @@ class SalesOrderController extends Controller
             null, [], 'sales_order', $order->id
         );
 
+        // Đơn trả hàng: tự động xác nhận + hoàn thành (ghi đảo bút toán, hoàn tồn kho ngay).
+        if ($isReturnOrder) {
+            $order = $this->salesOrderService->confirm($order);
+            $order = $this->salesOrderService->complete($order);
+        }
+
         return (new SalesOrderResource($order->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse'])))
             ->response()->setStatusCode(201);
     }
@@ -381,6 +409,8 @@ class SalesOrderController extends Controller
         $validated = $request->validate([
             'order_date' => ['sometimes', 'date'],
             'created_by' => ['sometimes', 'integer', Rule::exists('users', 'id')->where('organization_id', $this->orgId())],
+            'shipper_id' => ['sometimes', 'nullable', 'integer', Rule::exists('users', 'id')->where('organization_id', $this->orgId())],
+            'invoice_status' => ['sometimes', Rule::enum(InvoiceStatus::class)],
         ]);
 
         // Phạm vi quyền: không có "xem tất cả" thì chỉ sửa được đơn của mình/người được phép xem,
@@ -403,7 +433,172 @@ class SalesOrderController extends Controller
             }
         });
 
-        return new SalesOrderResource($salesOrder->fresh()->load(['company', 'createdBy', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'allocations.payment.account', 'returnOrder', 'originalOrder', 'promotion']));
+        return new SalesOrderResource($salesOrder->fresh()->load(['company', 'createdBy', 'shipper', 'restaurantTable', 'items.product', 'items.warehouse', 'payments.account', 'allocations.payment.account', 'returnOrder', 'originalOrder', 'promotion']));
+    }
+
+    /**
+     * Gắn nhân viên giao hàng cho nhiều đơn theo mã quét (số đơn / mã vận đơn / mã tham chiếu).
+     */
+    public function bulkAssignShipperByCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'codes' => ['required', 'array', 'min:1'],
+            'codes.*' => ['required', 'string'],
+            // Bỏ trống → tài khoản đang thực hiện chính là nhân viên giao hàng.
+            'shipper_id' => ['sometimes', 'nullable', 'integer', Rule::exists('users', 'id')->where('organization_id', $this->orgId())],
+        ]);
+
+        $codes = collect($validated['codes'])->map(fn ($c) => trim($c))->filter()->unique()->values();
+        $orgId = $this->orgId();
+        $shipperId = $validated['shipper_id'] ?? Auth::id();
+
+        $results = [];
+        $summary = ['assigned' => 0, 'not_found' => 0];
+
+        foreach ($codes as $code) {
+            $order = SalesOrder::where('organization_id', $orgId)
+                ->where(function ($q) use ($code) {
+                    $q->where('order_number', $code)
+                        ->orWhere('tracking_number', $code)
+                        ->orWhere('ref_id', $code);
+                })
+                ->first();
+
+            if (! $order) {
+                $summary['not_found']++;
+                $results[] = ['code' => $code, 'status' => 'not_found'];
+
+                continue;
+            }
+
+            $order->update(['shipper_id' => $shipperId]);
+            $summary['assigned']++;
+            $results[] = ['code' => $code, 'status' => 'assigned', 'order_number' => $order->order_number];
+        }
+
+        return response()->json(['summary' => $summary, 'results' => $results]);
+    }
+
+    /**
+     * Đổi trạng thái xuất hóa đơn cho nhiều đơn cùng lúc.
+     * Phạm vi quyền: không có "xem tất cả" thì chỉ đổi đơn của mình/người được phép xem.
+     */
+    public function bulkInvoiceStatus(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['integer'],
+            'invoice_status' => ['required', Rule::enum(InvoiceStatus::class)],
+        ]);
+
+        /** @var User $user */
+        $user = Auth::user();
+        $query = SalesOrder::whereIn('id', $validated['ids']);
+        if (! $user->hasPermission('sales.view_all')) {
+            $query->whereIn('created_by', array_merge([$user->id], $user->getViewableUserIds()));
+        }
+
+        $updated = $query->update(['invoice_status' => $validated['invoice_status']]);
+
+        return response()->json(['updated' => $updated]);
+    }
+
+    /**
+     * Dữ liệu xuất Excel hóa đơn (mẫu nhập khẩu MISA) cho các đơn đã chọn.
+     * Mỗi dòng hàng = một dòng Excel; trả về header + rows để frontend ghi file.
+     */
+    public function invoiceExport(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['integer'],
+        ]);
+
+        /** @var User $user */
+        $user = Auth::user();
+        $query = SalesOrder::with(['company', 'items.product', 'items.warehouse'])
+            ->whereIn('id', $validated['ids']);
+        if (! $user->hasPermission('sales.view_all')) {
+            $query->whereIn('created_by', array_merge([$user->id], $user->getViewableUserIds()));
+        }
+        $orders = $query->orderBy('order_date')->orderBy('id')->get();
+
+        $headers = [
+            'Hình thức bán hàng', 'Phương thức thanh toán', 'Kiêm phiếu xuất kho', 'Lập kèm hóa đơn',
+            'Đã lập hóa đơn', 'Ngày hạch toán (*)', 'Ngày chứng từ (*)', 'Số chứng từ (*)', 'Số phiếu xuất',
+            'Mẫu số HĐ', 'Ký hiệu HĐ', 'Số hóa đơn', 'Ngày hóa đơn', 'Mã khách hàng', 'Tên khách hàng',
+            'Địa chỉ', 'Mã số thuế', 'Đơn vị giao đại lý', 'Người nộp', 'Nộp vào TK', 'Mã hàng (*)', 'Tên hàng',
+            'Hàng khuyến mại', 'TK Tiền/Chi phí/Nợ (*)', 'TK Doanh thu/Có (*)', 'ĐVT', 'Số lượng', 'Đơn giá',
+            'Thành tiền', '% thuế GTGT', 'Tiền thuế GTGT', 'TK thuế GTGT', 'Mã kho', 'TK giá vốn', 'TK Kho',
+            'Lý do xuất', 'Diễn giải', 'Diễn giải(Xuất HĐ)',
+        ];
+
+        $rows = [];
+        foreach ($orders as $order) {
+            $invStatus = $order->invoice_status?->value ?? 'not_issued';
+            $payStatus = $order->payment_status?->value ?? 'unpaid';
+            $date = $order->order_date?->format('d/m/Y');
+            $hasInvoice = $invStatus === 'issued';
+            $desc = $order->notes ?: ('Bán hàng theo đơn '.$order->order_number);
+
+            foreach ($order->items as $item) {
+                // Bỏ qua chiết khấu: lấy theo đơn giá × số lượng. Đơn giá trên hệ thống ĐÃ GỒM VAT
+                // → tách ngược ra giá chưa thuế + tiền thuế. VAT mặc định 8% nếu dòng không khai thuế.
+                $qty = (float) $item->quantity;
+                $grossUnit = (float) $item->unit_price;        // đơn giá đã gồm VAT
+                $isGift = $grossUnit == 0.0 && $qty > 0;
+                $taxRate = (float) $item->tax_rate;
+                $rate = $isGift ? 0.0 : ($taxRate > 0 ? $taxRate : 8.0);
+
+                $grossLine = round($qty * $grossUnit);                                   // tiền khách trả (gồm VAT)
+                $unitPre = $rate > 0 ? round($grossUnit / (1 + $rate / 100)) : $grossUnit; // đơn giá chưa thuế
+                $netLine = round($unitPre * $qty);                                       // thành tiền chưa thuế
+                $taxAmount = $grossLine - $netLine;                                       // tiền thuế
+
+                $rows[] = [
+                    'Bán hàng hóa, dịch vụ trong nước',                 // 1
+                    $payStatus === 'paid' ? 'Tiền mặt' : 'Chưa thu tiền', // 2
+                    'Có',                                                // 3
+                    $invStatus !== 'not_issued' ? 'Có' : 'Không',        // 4
+                    $hasInvoice ? 'Có' : 'Không',                        // 5
+                    $date,                                               // 6
+                    $date,                                               // 7
+                    $order->order_number,                                // 8
+                    $order->order_number,                                // 9
+                    '',                                                  // 10
+                    '',                                                  // 11
+                    '',                                                  // 12
+                    $hasInvoice ? $date : '',                            // 13
+                    $order->company?->code,                              // 14
+                    $order->company?->name,                              // 15
+                    $order->company?->address,                           // 16
+                    $order->company?->tax_code,                          // 17
+                    '',                                                  // 18
+                    '',                                                  // 19
+                    '',                                                  // 20
+                    $item->product?->code,                               // 21
+                    $item->product?->name,                               // 22
+                    $isGift ? 'Có' : '',                                 // 23
+                    '131',                                               // 24
+                    '5111',                                              // 25
+                    $item->product?->unit,                               // 26
+                    $qty,                                                // 27 Số lượng
+                    $unitPre,                                            // 28 Đơn giá (chưa thuế)
+                    $netLine,                                            // 29 Thành tiền (chưa thuế)
+                    $rate,                                               // 30 % thuế GTGT
+                    $taxAmount,                                          // 31 Tiền thuế GTGT
+                    $rate > 0 ? '33311' : '',                            // 32 TK thuế GTGT
+                    $item->warehouse?->code,                             // 33
+                    '632',                                               // 34
+                    '156',                                               // 35
+                    'Xuất bán',                                          // 36
+                    $desc,                                               // 37
+                    $desc,                                               // 38
+                ];
+            }
+        }
+
+        return response()->json(['headers' => $headers, 'rows' => $rows]);
     }
 
     public function update(Request $request, SalesOrder $salesOrder): SalesOrderResource

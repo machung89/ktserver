@@ -130,6 +130,65 @@ class SalesOrderTest extends TestCase
             'id' => $return['id'],
             'original_order_id' => $original['id'],
         ]);
+
+        // Đơn trả hàng tự động hoàn thành ngay khi tạo
+        $this->assertEquals('completed', $return['status']['value'] ?? $return['status']);
+        $this->assertDatabaseHas('sales_orders', ['id' => $return['id'], 'status' => 'completed']);
+    }
+
+    public function test_full_return_keeps_original_cost_and_standard(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        $return = $this->postJson('/api/v1/sales', $this->validPayload([
+            'is_return_order' => true,
+            'original_order_id' => $order['id'],
+            'items' => [[
+                'product_id' => $this->product->id,
+                'warehouse_id' => $this->warehouse->id,
+                'quantity' => -2,
+                'unit_price' => 100000,
+                'cost_price' => 77777,      // giá vốn đơn gốc
+                'standard_price' => 55555,  // chia giá đơn gốc
+                'tax_rate' => 0,
+                'discount_type' => 'percent',
+                'discount_value' => 0,
+            ]],
+        ]))->assertCreated()->json('data');
+
+        // Đơn trả tự hoàn thành & GIỮ giá vốn + chia giá theo đơn gốc (confirm không ghi đè theo avg)
+        $this->assertDatabaseHas('sales_order_items', [
+            'sales_order_id' => $return['id'],
+            'cost_price' => 77777,
+            'standard_price' => 55555,
+        ]);
+    }
+
+    public function test_only_returns_filter_and_count(): void
+    {
+        $original = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $return = $this->postJson('/api/v1/sales', $this->validPayload([
+            'is_return_order' => true,
+            'original_order_id' => $original['id'],
+            'items' => [[
+                'product_id' => $this->product->id,
+                'warehouse_id' => $this->warehouse->id,
+                'quantity' => -1,
+                'unit_price' => 100000,
+                'tax_rate' => 0,
+                'discount_type' => 'percent',
+                'discount_value' => 0,
+            ]],
+        ]))->json('data');
+
+        // Tab "Trả hàng": chỉ hiện đơn trả
+        $res = $this->getJson('/api/v1/sales?only_returns=1')->assertOk()->json('data');
+        $ids = collect($res)->pluck('id')->all();
+        $this->assertContains($return['id'], $ids);
+        $this->assertNotContains($original['id'], $ids);
+
+        $this->getJson('/api/v1/sales/counts')->assertOk()->assertJsonPath('returns', 1);
     }
 
     #[TestDox('Đơn gốc hiển thị has_return = true khi đã có đơn trả')]
@@ -219,6 +278,133 @@ class SalesOrderTest extends TestCase
             'reference_id' => $order['id'],
             'entry_date' => $newDate,
         ]);
+    }
+
+    public function test_invoice_status_default_and_quick_update(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())
+            ->assertCreated()
+            ->assertJsonPath('data.invoice_status', 'not_issued')
+            ->json('data');
+
+        $this->patchJson("/api/v1/sales/{$order['id']}/quick-update", [
+            'invoice_status' => 'issued',
+        ])->assertOk()->assertJsonPath('data.invoice_status', 'issued');
+
+        $this->assertDatabaseHas('sales_orders', [
+            'id' => $order['id'],
+            'invoice_status' => 'issued',
+        ]);
+
+        // Giá trị ngoài enum bị từ chối
+        $this->patchJson("/api/v1/sales/{$order['id']}/quick-update", [
+            'invoice_status' => 'xyz',
+        ])->assertUnprocessable();
+    }
+
+    public function test_bulk_invoice_status_update(): void
+    {
+        $a = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $b = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+
+        $this->postJson('/api/v1/sales/bulk-invoice-status', [
+            'ids' => [$a['id'], $b['id']],
+            'invoice_status' => 'issued',
+        ])->assertOk()->assertJsonPath('updated', 2);
+
+        $this->assertDatabaseHas('sales_orders', ['id' => $a['id'], 'invoice_status' => 'issued']);
+        $this->assertDatabaseHas('sales_orders', ['id' => $b['id'], 'invoice_status' => 'issued']);
+    }
+
+    public function test_bulk_assign_shipper_by_code(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $shipper = User::factory()->create(['organization_id' => $this->organization->id]);
+
+        $this->postJson('/api/v1/sales/bulk-shipper-by-code', [
+            'codes' => [$order['order_number'], 'KHONG-CO'],
+            'shipper_id' => $shipper->id,
+        ])->assertOk()
+            ->assertJsonPath('summary.assigned', 1)
+            ->assertJsonPath('summary.not_found', 1);
+
+        $this->assertDatabaseHas('sales_orders', [
+            'id' => $order['id'],
+            'shipper_id' => $shipper->id,
+        ]);
+
+        // Sửa nhanh cũng gắn được & gỡ được (null)
+        $this->patchJson("/api/v1/sales/{$order['id']}/quick-update", ['shipper_id' => null])
+            ->assertOk()->assertJsonPath('data.shipper_id', null);
+    }
+
+    public function test_invoice_export_returns_38_columns(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+
+        $res = $this->postJson('/api/v1/sales/invoice-export', ['ids' => [$order['id']]])
+            ->assertOk()->json();
+
+        $this->assertCount(38, $res['headers']);
+        $this->assertEquals('Hình thức bán hàng', $res['headers'][0]);
+        $this->assertEquals('Diễn giải(Xuất HĐ)', $res['headers'][37]);
+
+        // 1 đơn × 1 dòng hàng = 1 dòng
+        $this->assertCount(1, $res['rows']);
+        $row = $res['rows'][0];
+        $this->assertEquals($order['order_number'], $row[7]);  // Số chứng từ
+        $this->assertEquals($this->product->code, $row[20]);   // Mã hàng
+        $this->assertEquals('131', $row[23]);                   // TK Nợ
+        $this->assertEquals('5111', $row[24]);                  // TK Doanh thu
+        $this->assertEquals(2, $row[26]);                       // Số lượng
+
+        // Đơn giá 100.000 đã gồm VAT, mặc định 8% → tách ngược:
+        // Đơn giá chưa thuế = round(100000/1.08)=92593; Thành tiền = 185186; thuế 8%; tiền thuế = 200000-185186
+        $this->assertEquals(92593, $row[27]);                   // Đơn giá (chưa thuế)
+        $this->assertEquals(185186, $row[28]);                  // Thành tiền (chưa thuế)
+        $this->assertEquals(8, $row[29]);                       // % thuế GTGT (mặc định)
+        $this->assertEquals(14814, $row[30]);                   // Tiền thuế GTGT
+        $this->assertEquals('33311', $row[31]);                 // TK thuế GTGT
+        // Thành tiền + tiền thuế = tiền khách trả (gồm VAT), bỏ chiết khấu
+        $this->assertEquals(200000, (float) $row[28] + (float) $row[30]);
+    }
+
+    public function test_invoice_export_ignores_discount(): void
+    {
+        // Dòng hàng có chiết khấu 10% → amount lưu = 180.000, nhưng export phải bỏ qua chiết khấu
+        $order = $this->postJson('/api/v1/sales', $this->validPayload([
+            'items' => [[
+                'product_id' => $this->product->id,
+                'warehouse_id' => $this->warehouse->id,
+                'quantity' => 2,
+                'unit_price' => 100000,
+                'tax_rate' => 0,
+                'discount_type' => 'percent',
+                'discount_value' => 10,
+            ]],
+        ]))->json('data');
+
+        $row = $this->postJson('/api/v1/sales/invoice-export', ['ids' => [$order['id']]])
+            ->assertOk()->json('rows')[0];
+
+        // Tính theo đơn giá × SL = 200.000 (gồm VAT), KHÔNG theo amount đã chiết khấu (180.000)
+        $this->assertEquals(185186, $row[28]);                  // Thành tiền chưa thuế
+        $this->assertEquals(14814, $row[30]);                   // Tiền thuế
+        $this->assertEquals(200000, (float) $row[28] + (float) $row[30]);
+    }
+
+    public function test_filter_by_invoice_status(): void
+    {
+        $a = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $b = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+
+        $this->patchJson("/api/v1/sales/{$a['id']}/quick-update", ['invoice_status' => 'proposed'])->assertOk();
+
+        $res = $this->getJson('/api/v1/sales?invoice_status=proposed')->assertOk()->json('data');
+        $ids = collect($res)->pluck('id')->all();
+
+        $this->assertContains($a['id'], $ids);
+        $this->assertNotContains($b['id'], $ids);
     }
 
     #[TestDox('Sửa nhanh không nhận người tạo ngoài tổ chức')]

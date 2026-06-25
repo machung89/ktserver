@@ -119,10 +119,14 @@ class SalesOrderService
                 ->get()
                 ->keyBy('product_id');
 
+            // Đơn trả hàng (đã gắn original_order_id): GIỮ nguyên giá vốn đã snapshot theo
+            // đơn gốc — không tính lại theo avg hiện tại, để đảo đúng giá vốn đã ghi khi bán.
+            $isReturn = $order->original_order_id !== null;
+
             // Snapshot cost_price vào từng item tại thời điểm xuất (WAC):
             // - Sản phẩm có công thức → giá vốn = Σ(SL NL × giá TB NL) / SL thành phẩm
             // - Sản phẩm thường       → giá vốn = giá TB xuất kho thành phẩm
-            foreach ($order->items as $item) {
+            foreach ($isReturn ? collect() : $order->items as $item) {
                 $recipe = $recipes->get($item->product_id);
 
                 if ($recipe) {
@@ -140,7 +144,8 @@ class SalesOrderService
                             * ($ingInventory ? (float) $ingInventory->avg_cost : 0);
                     }
 
-                    $costPerUnit = $item->quantity > 0 ? $totalIngCost / (float) $item->quantity : 0;
+                    // Cho phép SL âm (đơn trả hàng) — chỉ tránh chia cho 0.
+                    $costPerUnit = (float) $item->quantity != 0.0 ? $totalIngCost / (float) $item->quantity : 0;
                     $item->update(['cost_price' => round($costPerUnit, 4)]);
                 } else {
                     $inventory = Inventory::where([

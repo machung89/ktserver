@@ -27,6 +27,7 @@ class SalesOrderResource extends JsonResource
             'standard_total' => $this->standard_total,
             'employee_profit' => $this->employee_profit,
             'payment_status' => $this->payment_status,
+            'invoice_status' => $this->invoice_status,
             'paid_amount' => $this->paid_amount,
             'has_export' => (bool) ($this->warehouse_exports_exists ?? false),
             'original_order_id' => $this->original_order_id,
@@ -45,6 +46,8 @@ class SalesOrderResource extends JsonResource
             'notes' => $this->notes,
             'created_by' => $this->created_by,
             'created_by_name' => $this->whenLoaded('createdBy', fn () => $this->createdBy?->name),
+            'shipper_id' => $this->shipper_id,
+            'shipper_name' => $this->whenLoaded('shipper', fn () => $this->shipper?->name),
             'company' => new CompanyResource($this->whenLoaded('company')),
             'items' => SalesOrderItemResource::collection($this->whenLoaded('items')),
             // Lịch sử thanh toán = phiếu gắn trực tiếp + phần được phân bổ từ phiếu thu gộp/tiền thu trước

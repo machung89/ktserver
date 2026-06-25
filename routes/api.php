@@ -207,6 +207,9 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::patch('sales/{salesOrder}/quick-update', [SalesOrderController::class, 'quickUpdate'])->middleware('permission:sales.edit');
         Route::post('sales/bulk-confirm', [SalesOrderController::class, 'bulkConfirm'])->middleware('permission:sales.confirm');
         Route::post('sales/bulk-confirm-by-code', [SalesOrderController::class, 'bulkConfirmByCode'])->middleware('permission:sales.confirm');
+        Route::post('sales/bulk-invoice-status', [SalesOrderController::class, 'bulkInvoiceStatus'])->middleware('permission:sales.edit');
+        Route::post('sales/bulk-shipper-by-code', [SalesOrderController::class, 'bulkAssignShipperByCode'])->middleware('permission:sales.edit');
+        Route::post('sales/invoice-export', [SalesOrderController::class, 'invoiceExport'])->middleware('permission:sales.view');
         Route::post('sales/{salesOrder}/confirm', [SalesOrderController::class, 'confirm'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/ship', [SalesOrderController::class, 'ship'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/complete', [SalesOrderController::class, 'complete'])->middleware('permission:sales.confirm');

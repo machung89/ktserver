@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\InvoiceStatus;
 use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Models\Concerns\HasPaymentStatus;
@@ -16,7 +17,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
-#[Fillable(['order_number', 'ref_id', 'original_order_id', 'tracking_number', 'company_id', 'restaurant_table_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'discount_type', 'discount_value', 'discount_amount', 'total_amount', 'standard_total', 'employee_profit', 'notes', 'promotion_id', 'organization_id', 'payment_status', 'paid_amount', 'created_by'])]
+#[Fillable(['order_number', 'ref_id', 'original_order_id', 'tracking_number', 'company_id', 'restaurant_table_id', 'order_date', 'expected_date', 'status', 'subtotal', 'tax_amount', 'discount_type', 'discount_value', 'discount_amount', 'total_amount', 'standard_total', 'employee_profit', 'notes', 'promotion_id', 'organization_id', 'payment_status', 'invoice_status', 'paid_amount', 'created_by', 'shipper_id'])]
 class SalesOrder extends Model
 {
     /** @use HasFactory<SalesOrderFactory> */
@@ -32,6 +33,7 @@ class SalesOrder extends Model
         return [
             'status' => OrderStatus::class,
             'payment_status' => PaymentStatus::class,
+            'invoice_status' => InvoiceStatus::class,
             'order_date' => 'date',
             'expected_date' => 'date',
             'subtotal' => 'decimal:2',
@@ -63,6 +65,11 @@ class SalesOrder extends Model
     public function createdBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function shipper(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'shipper_id');
     }
 
     public function items(): HasMany

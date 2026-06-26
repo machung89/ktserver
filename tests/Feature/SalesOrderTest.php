@@ -165,6 +165,46 @@ class SalesOrderTest extends TestCase
         ]);
     }
 
+    public function test_sale_order_allows_negative_quantity_line(): void
+    {
+        // Đơn bán thường có dòng âm (đổi/điều chỉnh) — được chấp nhận
+        $order = $this->postJson('/api/v1/sales', $this->validPayload([
+            'items' => [[
+                'product_id' => $this->product->id,
+                'warehouse_id' => $this->warehouse->id,
+                'quantity' => -1,
+                'unit_price' => 100000,
+                'tax_rate' => 0,
+                'discount_type' => 'percent',
+                'discount_value' => 0,
+            ]],
+        ]))->assertCreated()->json('data');
+
+        $this->assertEquals(-100000, (float) $order['total_amount']);
+
+        // Xác nhận: dòng âm = nhập trả lại kho (100 → 101), bút toán cân (confirm không ném lỗi)
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+        $inv = Inventory::where([
+            'product_id' => $this->product->id,
+            'warehouse_id' => $this->warehouse->id,
+            'organization_id' => $this->organization->id,
+        ])->first();
+        $this->assertEquals(101, (float) $inv->quantity);
+
+        // Số lượng 0 vẫn bị từ chối
+        $this->postJson('/api/v1/sales', $this->validPayload([
+            'items' => [[
+                'product_id' => $this->product->id,
+                'warehouse_id' => $this->warehouse->id,
+                'quantity' => 0,
+                'unit_price' => 100000,
+                'tax_rate' => 0,
+                'discount_type' => 'percent',
+                'discount_value' => 0,
+            ]],
+        ]))->assertUnprocessable();
+    }
+
     public function test_only_returns_filter_and_count(): void
     {
         $original = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');

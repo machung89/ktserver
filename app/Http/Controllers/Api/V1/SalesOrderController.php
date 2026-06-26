@@ -135,7 +135,10 @@ class SalesOrderController extends Controller
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.warehouse_id' => ['required', 'exists:warehouses,id'],
-            'items.*.quantity' => ['required', 'numeric', $isReturnOrder ? 'max:-0.001' : 'min:0.001'],
+            // Đơn trả: bắt buộc âm. Đơn bán thường: cho phép cả dương lẫn âm (đơn đổi/điều chỉnh có dòng trả).
+            'items.*.quantity' => $isReturnOrder
+                ? ['required', 'numeric', 'max:-0.001']
+                : ['required', 'numeric', 'not_in:0'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.cost_price' => ['nullable', 'numeric', 'min:0'],
             'items.*.standard_price' => ['nullable', 'numeric', 'min:0'],
@@ -618,7 +621,7 @@ class SalesOrderController extends Controller
             'items' => ['sometimes', 'array', 'min:1'],
             'items.*.product_id' => ['required_with:items', 'exists:products,id'],
             'items.*.warehouse_id' => ['required_with:items', 'exists:warehouses,id'],
-            'items.*.quantity' => ['required_with:items', 'numeric', 'min:0.001'],
+            'items.*.quantity' => ['required_with:items', 'numeric', 'not_in:0'],
             'items.*.unit_price' => ['required_with:items', 'numeric', 'min:0'],
             'items.*.cost_price' => ['nullable', 'numeric', 'min:0'],
             'items.*.discount_type' => ['nullable', 'in:percent,fixed'],

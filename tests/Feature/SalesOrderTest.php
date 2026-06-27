@@ -378,6 +378,59 @@ class SalesOrderTest extends TestCase
             ->assertOk()->assertJsonPath('data.shipper_id', null);
     }
 
+    public function test_shipper_assign_reports_remaining_unscanned_drafts(): void
+    {
+        // 3 đơn nháp, chỉ quét 1 → còn 2 đơn nháp chưa quét
+        $a = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $this->postJson('/api/v1/sales', $this->validPayload());
+        $this->postJson('/api/v1/sales', $this->validPayload());
+        $shipper = User::factory()->create(['organization_id' => $this->organization->id]);
+
+        $this->postJson('/api/v1/sales/bulk-shipper-by-code', [
+            'codes' => [$a['order_number']],
+            'shipper_id' => $shipper->id,
+        ])->assertOk()
+            ->assertJsonPath('summary.assigned', 1)
+            ->assertJsonPath('summary.remaining_draft', 2);
+    }
+
+    public function test_remaining_draft_counts_only_unscanned_drafts(): void
+    {
+        // 3 đơn nháp + 1 đơn đã xác nhận. Quét 1 đơn nháp + 1 đơn đã xác nhận.
+        $draftA = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $this->postJson('/api/v1/sales', $this->validPayload()); // nháp B
+        $this->postJson('/api/v1/sales', $this->validPayload()); // nháp C
+        $confirmed = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($confirmed['id']));
+        $shipper = User::factory()->create(['organization_id' => $this->organization->id]);
+
+        $this->postJson('/api/v1/sales/bulk-shipper-by-code', [
+            'codes' => [$draftA['order_number'], $confirmed['order_number']],
+            'shipper_id' => $shipper->id,
+        ])->assertOk()
+            ->assertJsonPath('summary.assigned', 2)
+            // 3 nháp − 1 nháp đã quét = 2 (đơn xác nhận đã quét KHÔNG ảnh hưởng số nháp)
+            ->assertJsonPath('summary.remaining_draft', 2);
+    }
+
+    public function test_filter_by_shipper_including_unassigned(): void
+    {
+        $withShipper = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $noShipper = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        $shipper = User::factory()->create(['organization_id' => $this->organization->id]);
+        $this->patchJson("/api/v1/sales/{$withShipper['id']}/quick-update", ['shipper_id' => $shipper->id])->assertOk();
+
+        // Lọc theo nhân viên giao
+        $ids = collect($this->getJson("/api/v1/sales?shipper_id={$shipper->id}")->json('data'))->pluck('id')->all();
+        $this->assertContains($withShipper['id'], $ids);
+        $this->assertNotContains($noShipper['id'], $ids);
+
+        // Lọc "Chưa có" (none)
+        $idsNone = collect($this->getJson('/api/v1/sales?shipper_id=none')->json('data'))->pluck('id')->all();
+        $this->assertContains($noShipper['id'], $idsNone);
+        $this->assertNotContains($withShipper['id'], $idsNone);
+    }
+
     public function test_invoice_export_returns_38_columns(): void
     {
         $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');

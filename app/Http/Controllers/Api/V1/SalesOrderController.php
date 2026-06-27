@@ -80,6 +80,19 @@ class SalesOrderController extends Controller
                     $q->whereIn('invoice_status', $statuses);
                 }
             })
+            ->when($request->filled('shipper_id'), function ($q) use ($request) {
+                $vals = array_filter(explode(',', $request->shipper_id), fn ($v) => $v !== '');
+                $hasNone = in_array('none', $vals, true);
+                $ids = array_values(array_filter($vals, fn ($v) => $v !== 'none'));
+                $q->where(function ($q) use ($ids, $hasNone) {
+                    if ($ids) {
+                        $q->whereIn('shipper_id', $ids);
+                    }
+                    if ($hasNone) {
+                        $q->orWhereNull('shipper_id');
+                    }
+                });
+            })
             ->latest()
             ->paginate($request->filled('per_page') ? (int) $request->per_page : 20);
 
@@ -457,6 +470,7 @@ class SalesOrderController extends Controller
 
         $results = [];
         $summary = ['assigned' => 0, 'not_found' => 0];
+        $matchedIds = [];
 
         foreach ($codes as $code) {
             $order = SalesOrder::where('organization_id', $orgId)
@@ -474,10 +488,17 @@ class SalesOrderController extends Controller
                 continue;
             }
 
+            $matchedIds[] = $order->id;
             $order->update(['shipper_id' => $shipperId]);
             $summary['assigned']++;
             $results[] = ['code' => $code, 'status' => 'assigned', 'order_number' => $order->order_number];
         }
+
+        // Số đơn nháp còn lại CHƯA quét (tổng đơn nháp trừ các đơn vừa quét trúng)
+        $summary['remaining_draft'] = SalesOrder::where('organization_id', $orgId)
+            ->where('status', OrderStatus::Draft)
+            ->when($matchedIds, fn ($q) => $q->whereNotIn('id', $matchedIds))
+            ->count();
 
         return response()->json(['summary' => $summary, 'results' => $results]);
     }

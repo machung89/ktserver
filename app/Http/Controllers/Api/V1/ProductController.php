@@ -36,6 +36,7 @@ class ProductController extends Controller
         $products = Product::with(['category.parent', 'units', 'recipe.ingredients.ingredient:id,name,unit,code'])
             ->when($request->search, fn ($q, $v) => $q->where('name', 'like', "%{$v}%")->orWhere('code', 'like', "%{$v}%"))
             ->when($request->category_id, fn ($q, $v) => $q->where('category_id', $v))
+            ->when($request->boolean('uncategorized'), fn ($q) => $q->whereNull('category_id'))
             ->when($request->boolean('active_only', false), fn ($q) => $q->where('is_active', true))
             ->when($request->product_type, fn ($q, $v) => $q->where('product_type', $v))
             ->orderBy($sortBy, $sortDir)

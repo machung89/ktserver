@@ -50,6 +50,14 @@ class ReportController extends Controller
             ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
             ->sum('total_amount');
 
+        // Doanh số hôm nay — gồm cả đơn nháp, bỏ đơn đã hủy
+        $revenueToday = (float) DB::table('sales_orders')
+            ->where('organization_id', $orgId)
+            ->where('status', '!=', 'cancelled')
+            ->whereDate('order_date', now()->toDateString())
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
+            ->sum('total_amount');
+
         // Tổng nhập tháng — gồm cả đơn nháp, bỏ đơn đã hủy
         $purchaseMonth = (float) DB::table('purchase_orders')
             ->where('organization_id', $orgId)
@@ -167,6 +175,7 @@ class ReportController extends Controller
             ->get();
 
         return response()->json([
+            'revenue_today' => $revenueToday,
             'revenue_month' => $revenueMonth,
             'purchase_month' => $purchaseMonth,
             'total_debt' => $totalDebt,

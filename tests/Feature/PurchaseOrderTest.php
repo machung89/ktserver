@@ -4,9 +4,16 @@ namespace Tests\Feature;
 
 use App\Enums\CompanyType;
 use App\Models\Company;
+use App\Models\Inventory;
 use App\Models\Product;
 use App\Models\PurchaseOrder;
+use App\Models\Recipe;
+use App\Models\SalesOrder;
 use App\Models\Warehouse;
+use App\Services\DefaultAccountsService;
+use App\Services\PurchaseOrderService;
+use Database\Seeders\SystemAccountsSeeder;
+use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
 
@@ -50,6 +57,107 @@ class PurchaseOrderTest extends TestCase
                 'unit_price' => 60000,
             ]],
         ], $override);
+    }
+
+    #[TestDox('Thành tiền/thuế/tổng đơn nhập được làm tròn về đồng nguyên khi lưu')]
+    public function test_amounts_rounded_to_integer_on_save(): void
+    {
+        // 3 × 33.333,33 = 99.999,99 → làm tròn 100.000; VAT 10% = 10.000; tổng 110.000
+        $data = $this->postJson('/api/v1/purchases', $this->validPayload([
+            'items' => [[
+                'product_id' => $this->product->id,
+                'quantity' => 3,
+                'unit_price' => 33333.33,
+                'tax_rate' => 10,
+            ]],
+        ]))->assertCreated()->json('data');
+
+        $this->assertDatabaseHas('purchase_order_items', [
+            'purchase_order_id' => $data['id'],
+            'amount' => 100000,
+        ]);
+        $this->assertDatabaseHas('purchase_orders', [
+            'id' => $data['id'],
+            'subtotal' => 100000,
+            'tax_amount' => 10000,
+            'total_amount' => 110000,
+        ]);
+
+        // Sửa đơn cũng phải lưu giá trị đã làm tròn
+        $this->putJson("/api/v1/purchases/{$data['id']}", $this->validPayload([
+            'items' => [[
+                'product_id' => $this->product->id,
+                'quantity' => 3,
+                'unit_price' => 33333.33,
+                'tax_rate' => 0,
+            ]],
+        ]))->assertOk();
+
+        $this->assertDatabaseHas('purchase_orders', [
+            'id' => $data['id'],
+            'subtotal' => 100000,
+            'tax_amount' => 0,
+            'total_amount' => 100000,
+        ]);
+    }
+
+    #[TestDox('Cho phép số lượng âm (trả hàng NCC): tạo được + xác nhận giảm tồn, bút toán cân')]
+    public function test_allows_negative_quantity_and_confirm_balances(): void
+    {
+        app()->instance('orgId', $this->organization->id);
+        $this->seed(SystemAccountsSeeder::class);
+        app(DefaultAccountsService::class)->seedForOrganization($this->organization->id);
+
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 100, 'avg_cost' => 50000, 'stock_value' => 5000000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+
+        // Đơn nhập SL âm 10 (trả hàng NCC) → thành tiền -600.000
+        $order = $this->postJson('/api/v1/purchases', $this->validPayload([
+            'items' => [['product_id' => $this->product->id, 'quantity' => -10, 'unit_price' => 60000]],
+        ]))->assertCreated()->json('data');
+
+        $this->assertDatabaseHas('purchase_orders', ['id' => $order['id'], 'total_amount' => -600000]);
+
+        app(PurchaseOrderService::class)->confirm(PurchaseOrder::find($order['id']));
+
+        // Tồn giảm 100 → 90
+        $this->assertEquals(90.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'));
+
+        // Bút toán cân
+        $sums = DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->where('j.reference_type', PurchaseOrder::class)->where('j.reference_id', $order['id'])
+            ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
+        $this->assertEquals((float) $sums->d, (float) $sums->c, 'Bút toán đơn nhập âm vẫn cân');
+    }
+
+    #[TestDox('Đề xuất nhập: loại combo/định mức, cộng tiêu hao nguyên liệu từ combo bán ra')]
+    public function test_suggest_excludes_combo_and_counts_ingredient_consumption(): void
+    {
+        $compA = Product::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true, 'cost_price' => 10000]);
+        $combo = Product::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true]);
+        Recipe::create(['organization_id' => $this->organization->id, 'product_id' => $combo->id, 'type' => 'combo', 'yield_quantity' => 1])
+            ->ingredients()->create(['ingredient_id' => $compA->id, 'quantity' => 2]);
+
+        // Nguyên liệu compA tồn 0 → sẽ thiếu khi combo bán
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $compA->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 0, 'reserved_quantity' => 0, 'avg_cost' => 10000, 'stock_value' => 0, 'min_quantity' => 0]);
+
+        $customer = Company::factory()->create(['organization_id' => $this->organization->id, 'type' => CompanyType::Customer]);
+        $so = SalesOrder::create([
+            'organization_id' => $this->organization->id, 'company_id' => $customer->id,
+            'order_number' => 'SODB1', 'order_date' => now()->toDateString(), 'status' => 'completed',
+            'subtotal' => 0, 'tax_amount' => 0, 'total_amount' => 0, 'created_by' => $this->user->id,
+        ]);
+        // Bán 30 combo trong kỳ → tiêu hao compA = 30 × 2 = 60 → tốc độ 2/ngày
+        $so->items()->create(['product_id' => $combo->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 30, 'unit_price' => 50000, 'amount' => 1500000, 'cost_price' => 20000, 'standard_price' => 0, 'tax_rate' => 0, 'is_return' => false]);
+
+        $data = $this->getJson('/api/v1/purchases/suggest?days=15')->assertOk()->json('data');
+        $byId = collect($data)->keyBy('product_id');
+
+        // Combo KHÔNG được đề xuất nhập; nguyên liệu compA ĐƯỢC đề xuất theo tiêu hao qua combo
+        $this->assertArrayNotHasKey($combo->id, $byId->all(), 'Combo không được đề xuất nhập');
+        $this->assertArrayHasKey($compA->id, $byId->all(), 'Nguyên liệu phải được đề xuất theo tiêu hao combo');
+        $this->assertEquals(2.0, (float) $byId[$compA->id]['velocity']);   // 60/30
+        $this->assertEquals(30.0, (float) $byId[$compA->id]['suggest_qty']); // 2 × 15 − 0
     }
 
     #[TestDox('Tạo đơn nhập hàng')]

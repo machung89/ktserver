@@ -6,6 +6,7 @@ use App\Enums\OrderStatus;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PurchaseOrderResource;
+use App\Models\Organization;
 use App\Models\Product;
 use App\Models\PurchaseOrder;
 use App\Models\Recipe;
@@ -74,6 +75,30 @@ class PurchaseOrderController extends Controller
             ->selectRaw('soi.product_id, SUM(soi.quantity) as sold')
             ->pluck('sold', 'soi.product_id');
 
+        // Loại hình sản xuất: bán thẳng thành phẩm (không bung công thức).
+        // Còn lại: combo/định mức bán ra tiêu hao NGUYÊN LIỆU → quy đổi sản lượng bán thành mức tiêu hao từng nguyên liệu.
+        $isManufacturing = Organization::find($orgId)?->setting('business_mode') === 'manufacturing';
+        $recipes = $isManufacturing ? collect() : Recipe::with('ingredients')
+            ->whereIn('product_id', $soldMap->keys()->all())
+            ->whereIn('type', ['combo', 'recipe'])
+            ->get()->keyBy('product_id');
+
+        // Tiêu hao thực = bán trực tiếp (SP thường) + bung combo/định mức ra nguyên liệu
+        $consumption = [];
+        foreach ($soldMap as $pid => $sold) {
+            $recipe = $recipes->get($pid);
+            if ($recipe) {
+                $yield = (float) $recipe->yield_quantity ?: 1.0;
+                $multiplier = (float) $sold / $yield;
+                foreach ($recipe->ingredients as $ingredient) {
+                    $consumption[$ingredient->ingredient_id] = ($consumption[$ingredient->ingredient_id] ?? 0)
+                        + (float) $ingredient->quantity * $multiplier;
+                }
+            } else {
+                $consumption[$pid] = ($consumption[$pid] ?? 0) + (float) $sold;
+            }
+        }
+
         // Tồn khả dụng theo SP (theo kho chọn, hoặc tổng tất cả kho)
         $stockMap = DB::table('inventories')
             ->where('organization_id', $orgId)
@@ -82,8 +107,8 @@ class PurchaseOrderController extends Controller
             ->selectRaw('product_id, SUM(quantity - reserved_quantity) as available')
             ->pluck('available', 'product_id');
 
-        // Ứng viên: SP có bán trong 30 ngày HOẶC SP đang âm kho (để bù về 0)
-        $candidateIds = $soldMap->keys()
+        // Ứng viên: SP có tiêu hao trong 30 ngày HOẶC đang âm kho (để bù về 0)
+        $candidateIds = collect(array_keys($consumption))
             ->merge($stockMap->filter(fn ($a) => (float) $a < 0)->keys())
             ->unique()
             ->values();
@@ -92,10 +117,10 @@ class PurchaseOrderController extends Controller
             return response()->json(['data' => []]);
         }
 
-        // Loại sản phẩm combo (bán-only, không có tồn riêng) khỏi đề xuất nhập
+        // Loại combo & định mức (làm/sản xuất, không mua) — chỉ đề xuất nhập nguyên liệu / hàng mua thật
         $products = Product::whereIn('id', $candidateIds->all())
             ->where('is_active', true)
-            ->whereDoesntHave('recipe', fn ($q) => $q->where('type', 'combo'))
+            ->whereDoesntHave('recipe', fn ($q) => $q->whereIn('type', ['combo', 'recipe']))
             ->get()->keyBy('id');
 
         $items = [];
@@ -105,7 +130,7 @@ class PurchaseOrderController extends Controller
                 continue;
             }
 
-            $velocity = (float) ($soldMap[$pid] ?? 0) / $window;
+            $velocity = (float) ($consumption[$pid] ?? 0) / $window;
             $available = (float) ($stockMap[$pid] ?? 0);
 
             // Mục tiêu = đủ bán N ngày, đồng thời không để tồn âm.
@@ -163,7 +188,7 @@ class PurchaseOrderController extends Controller
             'items.*.product_id' => ['required', 'exists:products,id'],
             'items.*.unit' => ['nullable', 'string', 'max:50'],
             'items.*.unit_factor' => ['nullable', 'numeric', 'min:0.0001'],
-            'items.*.quantity' => ['required', 'numeric', 'min:0.001'],
+            'items.*.quantity' => ['required', 'numeric', 'not_in:0'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
@@ -188,10 +213,10 @@ class PurchaseOrderController extends Controller
         $taxAmount = 0;
 
         foreach ($validated['items'] as $item) {
-            $amount = $item['quantity'] * $item['unit_price'];
+            $amount = round($item['quantity'] * $item['unit_price']); // VND: làm tròn về đồng nguyên
             $taxRate = $item['tax_rate'] ?? 0;
             $subtotal += $amount;
-            $taxAmount += $amount * $taxRate / 100;
+            $taxAmount += round($amount * $taxRate / 100);
 
             $order->items()->create([
                 'product_id' => $item['product_id'],
@@ -252,7 +277,7 @@ class PurchaseOrderController extends Controller
             'items.*.product_id' => ['required_with:items', 'exists:products,id'],
             'items.*.unit' => ['nullable', 'string', 'max:50'],
             'items.*.unit_factor' => ['nullable', 'numeric', 'min:0.0001'],
-            'items.*.quantity' => ['required_with:items', 'numeric', 'min:0.001'],
+            'items.*.quantity' => ['required_with:items', 'numeric', 'not_in:0'],
             'items.*.unit_price' => ['required_with:items', 'numeric', 'min:0'],
             'items.*.tax_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
@@ -268,10 +293,10 @@ class PurchaseOrderController extends Controller
             $subtotal = 0;
             $taxAmount = 0;
             foreach ($validated['items'] as $item) {
-                $amount = $item['quantity'] * $item['unit_price'];
+                $amount = round($item['quantity'] * $item['unit_price']); // VND: làm tròn về đồng nguyên
                 $taxRate = $item['tax_rate'] ?? 0;
                 $subtotal += $amount;
-                $taxAmount += $amount * $taxRate / 100;
+                $taxAmount += round($amount * $taxRate / 100);
                 $purchaseOrder->items()->create([
                     'product_id' => $item['product_id'],
                     'unit' => $item['unit'] ?? null,

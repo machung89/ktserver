@@ -28,7 +28,7 @@ class AuthController extends Controller
             'company_name' => ['required', 'string', 'max:255'],
             'company_tax_code' => ['nullable', 'string', 'max:50'],
             'company_address' => ['nullable', 'string', 'max:255'],
-            'business_mode' => ['required', 'in:retail,restaurant,tour'],
+            'business_mode' => ['required', 'in:retail,restaurant,tour,manufacturing'],
             'name' => ['required', 'string', 'max:255'],
             'phone' => ['required', 'string', 'max:20', 'unique:users'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],

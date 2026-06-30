@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\V1\OrganizationController;
 use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Controllers\Api\V1\ProductCategoryController;
 use App\Http\Controllers\Api\V1\ProductController;
+use App\Http\Controllers\Api\V1\ProductionOrderController;
 use App\Http\Controllers\Api\V1\PromotionController;
 use App\Http\Controllers\Api\V1\ProvinceController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
@@ -117,6 +118,15 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::put('recipes/{recipe}', [RecipeController::class, 'update'])->middleware('permission:products.edit');
         Route::delete('recipes/{recipe}', [RecipeController::class, 'destroy'])->middleware('permission:products.delete');
 
+        // Lệnh sản xuất (VAS: 621/622/627 → 154 → nhập kho thành phẩm)
+        Route::get('production-orders', [ProductionOrderController::class, 'index'])->middleware('permission:production.view');
+        Route::get('production-orders/{productionOrder}', [ProductionOrderController::class, 'show'])->middleware('permission:production.view');
+        Route::post('production-orders', [ProductionOrderController::class, 'store'])->middleware('permission:production.create', 'subscription');
+        Route::put('production-orders/{productionOrder}', [ProductionOrderController::class, 'update'])->middleware('permission:production.edit');
+        Route::post('production-orders/{productionOrder}/complete', [ProductionOrderController::class, 'complete'])->middleware('permission:production.complete');
+        Route::post('production-orders/{productionOrder}/cancel', [ProductionOrderController::class, 'cancel'])->middleware('permission:production.cancel');
+        Route::delete('production-orders/{productionOrder}', [ProductionOrderController::class, 'destroy'])->middleware('permission:production.delete');
+
         // Nhóm hàng / Ngành hàng
         Route::get('product-categories', [ProductCategoryController::class, 'index'])->middleware('permission:products.view');
         Route::post('product-categories', [ProductCategoryController::class, 'store'])->middleware('permission:products.create');
@@ -197,6 +207,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::middleware('permission:sales.view')->group(function () {
             Route::get('sales', [SalesOrderController::class, 'index']);
             Route::get('sales/counts', [SalesOrderController::class, 'counts']);
+            Route::get('sales/cancelled-codes', [SalesOrderController::class, 'cancelledCodes']);
             Route::get('sales/{salesOrder}', [SalesOrderController::class, 'show']);
         });
         Route::post('sales', [SalesOrderController::class, 'store'])->middleware('permission:sales.create', 'subscription');
@@ -258,6 +269,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('reports/receivables', [ReportController::class, 'receivables']);
             Route::get('reports/payables', [ReportController::class, 'payables']);
             Route::get('reports/sales', [ReportController::class, 'sales']);
+            Route::get('reports/tours', [ReportController::class, 'tours']);
             Route::get('reports/purchases', [ReportController::class, 'purchases']);
             Route::get('reports/promotions', [ReportController::class, 'promotions']);
             Route::get('reports/sold-products', [ReportController::class, 'soldProducts']);

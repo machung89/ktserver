@@ -1,0 +1,66 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * Dọn dữ liệu reserved_quantity âm/sai do lịch sử: đơn trả hàng & dòng SL âm
+ * từng giữ chỗ số âm (đã vá ở code). Dựng lại reserved_quantity từ các ĐƠN NHÁP
+ * đang giữ chỗ (chỉ dòng SL dương; bung combo/định mức theo nguyên liệu; tôn trọng
+ * business_mode = manufacturing thì không bung công thức).
+ */
+return new class extends Migration
+{
+    public function up(): void
+    {
+        // 1) Reset toàn bộ
+        DB::table('inventories')->update(['reserved_quantity' => 0]);
+
+        // 2) business_mode theo từng tổ chức
+        $modes = DB::table('organizations')->get(['id', 'settings'])
+            ->mapWithKeys(fn ($o) => [$o->id => (json_decode($o->settings ?? '{}', true)['business_mode'] ?? 'retail')]);
+
+        // 3) Công thức (combo/định mức) + nguyên liệu
+        $recipes = DB::table('recipes')->whereIn('type', ['combo', 'recipe'])->get()->keyBy('product_id');
+        $ingredientsByRecipe = DB::table('recipe_ingredients')->get()->groupBy('recipe_id');
+
+        // 4) Tổng hợp giữ chỗ từ các đơn nháp (chỉ dòng SL dương)
+        $items = DB::table('sales_order_items as i')
+            ->join('sales_orders as o', 'o.id', '=', 'i.sales_order_id')
+            ->where('o.status', 'draft')
+            ->where('i.quantity', '>', 0)
+            ->get(['i.product_id', 'i.warehouse_id', 'i.quantity', 'o.organization_id']);
+
+        $acc = []; // "org|wh|prod" => qty
+        foreach ($items as $it) {
+            $isManufacturing = ($modes[$it->organization_id] ?? 'retail') === 'manufacturing';
+            $recipe = ! $isManufacturing ? ($recipes[$it->product_id] ?? null) : null;
+
+            if ($recipe) {
+                $yield = (float) $recipe->yield_quantity ?: 1.0;
+                $multiplier = (float) $it->quantity / $yield;
+                foreach ($ingredientsByRecipe[$recipe->id] ?? [] as $ing) {
+                    $qty = round((float) $ing->quantity * $multiplier, 4);
+                    $key = "{$it->organization_id}|{$it->warehouse_id}|{$ing->ingredient_id}";
+                    $acc[$key] = ($acc[$key] ?? 0) + $qty;
+                }
+            } else {
+                $key = "{$it->organization_id}|{$it->warehouse_id}|{$it->product_id}";
+                $acc[$key] = ($acc[$key] ?? 0) + (float) $it->quantity;
+            }
+        }
+
+        // 5) Ghi lại reserved_quantity
+        foreach ($acc as $key => $qty) {
+            [$org, $wh, $prod] = explode('|', $key);
+            DB::table('inventories')
+                ->where(['organization_id' => $org, 'warehouse_id' => $wh, 'product_id' => $prod])
+                ->update(['reserved_quantity' => round($qty, 3)]);
+        }
+    }
+
+    public function down(): void
+    {
+        // Sửa dữ liệu một chiều — không hoàn tác.
+    }
+};

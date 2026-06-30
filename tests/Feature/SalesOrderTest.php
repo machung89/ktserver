@@ -20,6 +20,7 @@ use App\Services\DefaultAccountsService;
 use App\Services\PaymentService;
 use App\Services\SalesOrderService;
 use Database\Seeders\SystemAccountsSeeder;
+use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
 
@@ -163,6 +164,75 @@ class SalesOrderTest extends TestCase
             'cost_price' => 77777,
             'standard_price' => 55555,
         ]);
+    }
+
+    #[TestDox('Đơn TRẢ HÀNG (đơn riêng) nhập lại kho khi tự hoàn thành')]
+    public function test_return_order_restocks_inventory(): void
+    {
+        // Bán 2 → xác nhận → tồn 100 → 98
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+        $this->assertEquals(98.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'));
+
+        // Đơn trả hàng (auto hoàn thành) SL -2 → nhập lại kho → 100
+        $this->postJson('/api/v1/sales', $this->validPayload([
+            'is_return_order' => true,
+            'original_order_id' => $order['id'],
+            'items' => [['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => -2, 'unit_price' => 100000, 'cost_price' => 50000, 'standard_price' => 0, 'tax_rate' => 0, 'discount_type' => 'percent', 'discount_value' => 0]],
+        ]))->assertCreated();
+
+        $this->assertEquals(100.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'), 'Đơn trả hàng phải cộng lại tồn kho');
+    }
+
+    #[TestDox('Trả hàng theo dòng (return-items) nhập lại kho')]
+    public function test_return_items_restocks_inventory(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+        $this->assertEquals(98.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'));
+
+        // Trả 2 → nhập lại kho → 100
+        $this->postJson("/api/v1/sales/{$order['id']}/return-items", [
+            'return_date' => now()->toDateString(),
+            'items' => [['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 2]],
+        ])->assertOk();
+
+        $this->assertEquals(100.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'), 'Trả hàng theo dòng phải cộng lại tồn kho');
+    }
+
+    #[TestDox('Dòng SL âm KHÔNG giữ chỗ tồn → "có thể bán" không vượt tồn thực')]
+    public function test_negative_line_does_not_reserve_stock(): void
+    {
+        $key = ['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'organization_id' => $this->organization->id];
+
+        // Đơn nháp có dòng âm: KHÔNG được tạo giữ chỗ âm
+        $this->postJson('/api/v1/sales', $this->validPayload([
+            'items' => [['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => -1, 'unit_price' => 100000, 'tax_rate' => 0, 'discount_type' => 'percent', 'discount_value' => 0]],
+        ]))->assertCreated();
+
+        $inv = Inventory::where($key)->first();
+        $this->assertEquals(0.0, (float) $inv->reserved_quantity, 'Dòng âm không được giữ chỗ (reserved phải = 0)');
+        $this->assertEquals(100.0, (float) $inv->available_quantity, 'Có thể bán = tồn thực, không vượt');
+    }
+
+    #[TestDox('Đơn trả hàng không để lại giữ chỗ âm → "có thể bán" = tồn thực')]
+    public function test_return_order_leaves_no_negative_reservation(): void
+    {
+        $key = ['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'organization_id' => $this->organization->id];
+
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id'])); // tồn 100 → 98
+
+        $this->postJson('/api/v1/sales', $this->validPayload([
+            'is_return_order' => true,
+            'original_order_id' => $order['id'],
+            'items' => [['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => -2, 'unit_price' => 100000, 'cost_price' => 50000, 'standard_price' => 0, 'tax_rate' => 0, 'discount_type' => 'percent', 'discount_value' => 0]],
+        ]))->assertCreated(); // nhập lại → tồn 100
+
+        $inv = Inventory::where($key)->first();
+        $this->assertEquals(100.0, (float) $inv->quantity);
+        $this->assertEquals(0.0, (float) $inv->reserved_quantity, 'Trả hàng không để reserved âm');
+        $this->assertEquals(100.0, (float) $inv->available_quantity, 'Có thể bán = tồn thực (không vượt)');
     }
 
     public function test_sale_order_allows_negative_quantity_line(): void
@@ -413,6 +483,25 @@ class SalesOrderTest extends TestCase
             ->assertJsonPath('summary.remaining_draft', 2);
     }
 
+    public function test_cancelled_codes_last_10_days(): void
+    {
+        $recent = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        SalesOrder::find($recent['id'])->update(['status' => 'cancelled']);
+
+        $old = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        SalesOrder::find($old['id'])->update(['status' => 'cancelled']);
+        DB::table('sales_orders')
+            ->where('id', $old['id'])->update(['updated_at' => now()->subDays(20)]);
+
+        $active = $this->postJson('/api/v1/sales', $this->validPayload())->json('data'); // chưa hủy
+
+        $codes = $this->getJson('/api/v1/sales/cancelled-codes')->assertOk()->json('codes');
+
+        $this->assertContains($recent['order_number'], $codes);     // hủy gần đây → có
+        $this->assertNotContains($old['order_number'], $codes);     // hủy > 10 ngày → bỏ
+        $this->assertNotContains($active['order_number'], $codes);  // chưa hủy → bỏ
+    }
+
     public function test_filter_by_shipper_including_unassigned(): void
     {
         $withShipper = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
@@ -592,7 +681,7 @@ class SalesOrderTest extends TestCase
             'description' => 'Thu hoàn ứng NCC',
         ])->assertCreated()->json('data');
 
-        $credit331 = \DB::table('journal_entry_lines as l')
+        $credit331 = DB::table('journal_entry_lines as l')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->join('accounts as a', 'a.id', '=', 'l.account_id')
             ->where('j.reference_type', Payment::class)->where('j.reference_id', $p['id'])
@@ -633,7 +722,7 @@ class SalesOrderTest extends TestCase
         $this->assertEquals(300000.0, $svc->availableAdvance($this->customer->id, $this->organization->id));
 
         // Bút toán chi: Nợ 131 = 200.000
-        $debit131 = \DB::table('journal_entry_lines as l')
+        $debit131 = DB::table('journal_entry_lines as l')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->join('accounts as a', 'a.id', '=', 'l.account_id')
             ->where('j.reference_type', Payment::class)->where('j.reference_id', $p['id'])
@@ -671,6 +760,53 @@ class SalesOrderTest extends TestCase
         $this->assertEquals('draft', $order->status->value);
         // Giữ chỗ tồn kho (reserved) chứ chưa trừ tồn
         $this->assertEquals(2.0, (float) Inventory::where(['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id])->value('reserved_quantity'));
+    }
+
+    #[TestDox('Combo: lợi nhuận, lời/lỗ NV (theo standard_price combo) & bút toán đúng')]
+    public function test_combo_profit_employee_profit_and_journal(): void
+    {
+        $compA = Product::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true]);
+        $compB = Product::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true]);
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $compA->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 100, 'avg_cost' => 10000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $compB->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 100, 'avg_cost' => 5000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+
+        // Combo: 2×A + 1×B; giá vốn = 25.000; standard_price (giá định mức combo) = 40.000
+        $combo = Product::factory()->create(['organization_id' => $this->organization->id, 'price' => 50000, 'standard_price' => 40000, 'product_type' => 'product', 'is_active' => true]);
+        Recipe::create(['organization_id' => $this->organization->id, 'product_id' => $combo->id, 'type' => 'combo', 'yield_quantity' => 1])
+            ->ingredients()->createMany([
+                ['ingredient_id' => $compA->id, 'quantity' => 2],
+                ['ingredient_id' => $compB->id, 'quantity' => 1],
+            ]);
+
+        // Bán 3 combo @ 50.000 (doanh thu thuần 150.000)
+        $order = $this->postJson('/api/v1/sales', $this->validPayload([
+            'items' => [['product_id' => $combo->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 3, 'unit_price' => 50000, 'tax_rate' => 0]],
+        ]))->assertCreated()->json('data');
+
+        // Lời/lỗ NV (lưu lúc tạo đơn) = DT thuần 150.000 − định mức 3×40.000=120.000 = 30.000
+        $this->assertEquals(120000.0, (float) SalesOrder::find($order['id'])->standard_total);
+        $this->assertEquals(30000.0, (float) SalesOrder::find($order['id'])->employee_profit);
+
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        // Lợi nhuận gộp = DT thuần 150.000 − giá vốn 75.000 = 75.000
+        $cost = (float) DB::table('sales_order_items')->where('sales_order_id', $order['id'])->sum(DB::raw('quantity * cost_price'));
+        $this->assertEquals(75000.0, $cost);
+
+        // Báo cáo theo SP: combo có doanh thu/giá vốn/lợi nhuận/lời-lỗ NV đúng
+        $row = collect($this->getJson('/api/v1/reports/sales?group_by=product')->json('data'))
+            ->firstWhere('product_code', $combo->code);
+        $this->assertEquals(150000.0, (float) $row['revenue']);
+        $this->assertEquals(75000.0, (float) $row['cost']);
+        $this->assertEquals(75000.0, (float) $row['profit']);
+        $this->assertEquals(30000.0, (float) $row['employee_profit']);
+
+        // Bút toán cân
+        $sums = DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->where('j.reference_type', SalesOrder::class)->where('j.reference_id', $order['id'])
+            ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
+        $this->assertEquals((float) $sums->d, (float) $sums->c);
     }
 
     #[TestDox('Bán combo: giá vốn = tổng giá vốn thành phần, trừ kho thành phần (không trừ combo)')]
@@ -721,7 +857,7 @@ class SalesOrderTest extends TestCase
         $this->assertTrue($comboQty === null || (float) $comboQty === 0.0);
 
         // Bút toán: 632/156 = giá vốn thành phần (3*25000=75000); 511/131 = doanh thu (3*50000=150000)
-        $ledger = fn (string $code) => \DB::table('journal_entry_lines as l')
+        $ledger = fn (string $code) => DB::table('journal_entry_lines as l')
             ->join('accounts as a', 'a.id', '=', 'l.account_id')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->where('j.reference_type', SalesOrder::class)
@@ -757,7 +893,7 @@ class SalesOrderTest extends TestCase
         app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
 
         // Bút toán cân + 511 = doanh thu thuần 180.000; 131 = 180.000
-        $line = fn (string $code) => \DB::table('journal_entry_lines as l')
+        $line = fn (string $code) => DB::table('journal_entry_lines as l')
             ->join('accounts as a', 'a.id', '=', 'l.account_id')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->where('j.reference_type', SalesOrder::class)->where('j.reference_id', $order['id'])
@@ -767,7 +903,7 @@ class SalesOrderTest extends TestCase
         $this->assertEquals(180000.0, (float) $line('511')->c, '511 = doanh thu thuần (đã trừ CK)');
         $this->assertEquals(180000.0, (float) $line('131')->d, '131 = tổng phải thu');
 
-        $sums = \DB::table('journal_entry_lines as l')
+        $sums = DB::table('journal_entry_lines as l')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->where('j.reference_type', SalesOrder::class)->where('j.reference_id', $order['id'])
             ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
@@ -780,7 +916,7 @@ class SalesOrderTest extends TestCase
         $order = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
 
         // Mô phỏng dữ liệu nguồn (Shopee/Tiktok cũ) chưa làm tròn: tổng tiền có phần lẻ .5
-        \DB::table('sales_orders')->where('id', $order['id'])->update([
+        DB::table('sales_orders')->where('id', $order['id'])->update([
             'subtotal' => 89077.5,
             'total_amount' => 89077.5,
             'tax_amount' => 0,
@@ -788,7 +924,7 @@ class SalesOrderTest extends TestCase
 
         app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
 
-        $sums = \DB::table('journal_entry_lines as l')
+        $sums = DB::table('journal_entry_lines as l')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->where('j.reference_type', SalesOrder::class)->where('j.reference_id', $order['id'])
             ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
@@ -828,7 +964,7 @@ class SalesOrderTest extends TestCase
         $this->assertEquals(2, PaymentAllocation::count());
         // Một bút toán duy nhất cho phiếu, cân Nợ = Có = 250.000
         $payment = Payment::where('type', 'receipt')->firstOrFail();
-        $sums = \DB::table('journal_entry_lines as l')
+        $sums = DB::table('journal_entry_lines as l')
             ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
             ->where('j.reference_type', Payment::class)->where('j.reference_id', $payment->id)
             ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
@@ -1020,16 +1156,44 @@ class SalesOrderTest extends TestCase
         $this->assertEquals(380000.0, (float) $res['total_revenue']);
     }
 
+    #[TestDox('Chuẩn kế toán: doanh thu báo cáo KHÔNG gồm VAT, lời/lỗ NV trên doanh thu thuần')]
+    public function test_revenue_report_and_employee_profit_exclude_vat(): void
+    {
+        $this->product->update(['standard_price' => 70000]);
+
+        // 2 × 100.000 = 200.000 (thuần); VAT 8% = 16.000; tổng 216.000
+        $order = $this->postJson('/api/v1/sales', $this->validPayload([
+            'items' => [[
+                'product_id' => $this->product->id,
+                'warehouse_id' => $this->warehouse->id,
+                'quantity' => 2,
+                'unit_price' => 100000,
+                'tax_rate' => 8,
+            ]],
+        ]))->assertCreated()->json('data');
+
+        $o = SalesOrder::find($order['id']);
+        $this->assertEquals(216000.0, (float) $o->total_amount, 'Tổng tiền gồm VAT');
+        // Lời/lỗ NV = doanh thu thuần 200.000 − định mức 140.000 = 60.000 (KHÔNG cộng VAT)
+        $this->assertEquals(60000.0, (float) $o->employee_profit);
+
+        app(SalesOrderService::class)->confirm($o);
+
+        $res = $this->getJson('/api/v1/reports/sales?group_by=product')->assertOk()->json();
+        // Doanh thu báo cáo = THUẦN 200.000 (không phải 216.000 gồm VAT)
+        $this->assertEquals(200000.0, (float) $res['total_revenue']);
+    }
+
     #[TestDox('Xác nhận hàng loạt theo mã vận đơn: nháp được xác nhận, trạng thái khác bỏ qua, mã sai báo không tìm thấy')]
     public function test_bulk_confirm_by_code(): void
     {
         // Đơn nháp + có mã vận đơn → sẽ được xác nhận
         $draft = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
-        \DB::table('sales_orders')->where('id', $draft['id'])->update(['tracking_number' => 'VD-001']);
+        DB::table('sales_orders')->where('id', $draft['id'])->update(['tracking_number' => 'VD-001']);
 
         // Đơn đã ở trạng thái khác (completed) → bỏ qua
         $other = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
-        \DB::table('sales_orders')->where('id', $other['id'])->update(['status' => 'completed', 'tracking_number' => 'VD-002']);
+        DB::table('sales_orders')->where('id', $other['id'])->update(['status' => 'completed', 'tracking_number' => 'VD-002']);
 
         $response = $this->postJson('/api/v1/sales/bulk-confirm-by-code', [
             'codes' => ['VD-001', 'VD-002', 'KHONG-TON-TAI'],

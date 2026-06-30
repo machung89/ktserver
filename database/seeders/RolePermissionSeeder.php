@@ -113,6 +113,14 @@ class RolePermissionSeeder extends Seeder
                 ['settings.view', 'Xem cài đặt'],
                 ['settings.edit', 'Sửa cài đặt'],
             ],
+            'production' => [
+                ['production.view', 'Xem lệnh sản xuất'],
+                ['production.create', 'Tạo lệnh sản xuất'],
+                ['production.edit', 'Sửa lệnh sản xuất'],
+                ['production.complete', 'Hoàn thành (nhập kho thành phẩm)'],
+                ['production.cancel', 'Hủy lệnh sản xuất'],
+                ['production.delete', 'Xóa lệnh sản xuất'],
+            ],
         ];
 
         foreach ($definitions as $module => $items) {

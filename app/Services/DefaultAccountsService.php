@@ -18,8 +18,8 @@ class DefaultAccountsService
         '111', '1111', '1112', '112', '1121', '1122',
         // Phải thu / thuế GTGT đầu vào / tạm ứng
         '131', '133', '1331', '138', '1388', '141',
-        // Hàng tồn kho
-        '152', '153', '155', '156',
+        // Hàng tồn kho + chi phí SXKD dở dang
+        '152', '153', '154', '155', '156',
         // Chi phí trả trước / TSCĐ
         '242', '211', '2111', '214', '2141',
         // Phải trả / thuế / lương
@@ -28,6 +28,8 @@ class DefaultAccountsService
         '411', '4111', '421', '4211',
         // Doanh thu / thu nhập
         '511', '515', '521', '711',
+        // Chi phí sản xuất
+        '621', '622', '627',
         // Giá vốn / chi phí
         '632', '635', '641', '642', '811', '821',
         // Xác định kết quả kinh doanh

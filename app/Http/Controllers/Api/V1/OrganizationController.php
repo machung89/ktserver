@@ -46,7 +46,7 @@ class OrganizationController extends Controller
             'settings.default_tax_rate' => ['numeric', 'min:0', 'max:100'],
             'settings.enable_discount' => ['boolean'],
             'settings.enable_employee_profit' => ['boolean'],
-            'settings.business_mode' => ['nullable', Rule::in(['retail', 'restaurant', 'tour'])],
+            'settings.business_mode' => ['nullable', Rule::in(['retail', 'restaurant', 'tour', 'manufacturing'])],
             'settings.tour_number_prefix' => ['nullable', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]*$/'],
             'settings.print_title' => ['nullable', 'string', 'max:100'],
             'settings.print_footer' => ['nullable', 'string', 'max:500'],

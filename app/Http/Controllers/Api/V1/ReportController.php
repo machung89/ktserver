@@ -42,21 +42,23 @@ class ReportController extends Controller
             ? null
             : array_merge([$user->id], $user->getViewableUserIds());
 
-        // Doanh thu tháng — gồm cả đơn nháp, bỏ đơn đã hủy
-        $revenueMonth = (float) DB::table('sales_orders')
-            ->where('organization_id', $orgId)
-            ->where('status', '!=', 'cancelled')
-            ->whereBetween('order_date', [$monthStart, $monthEnd])
-            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
-            ->sum('total_amount');
+        // Doanh thu thuần (chưa VAT) tháng — gồm cả đơn nháp, bỏ đơn đã hủy
+        $revenueMonth = (float) DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->where('so.status', '!=', 'cancelled')
+            ->whereBetween('so.order_date', [$monthStart, $monthEnd])
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->sum(DB::raw('soi.amount - soi.order_discount_alloc'));
 
-        // Doanh số hôm nay — gồm cả đơn nháp, bỏ đơn đã hủy
-        $revenueToday = (float) DB::table('sales_orders')
-            ->where('organization_id', $orgId)
-            ->where('status', '!=', 'cancelled')
-            ->whereDate('order_date', now()->toDateString())
-            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
-            ->sum('total_amount');
+        // Doanh thu thuần (chưa VAT) hôm nay — gồm cả đơn nháp, bỏ đơn đã hủy
+        $revenueToday = (float) DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->where('so.status', '!=', 'cancelled')
+            ->whereDate('so.order_date', now()->toDateString())
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->sum(DB::raw('soi.amount - soi.order_discount_alloc'));
 
         // Tổng nhập tháng — gồm cả đơn nháp, bỏ đơn đã hủy
         $purchaseMonth = (float) DB::table('purchase_orders')
@@ -119,14 +121,14 @@ class ReportController extends Controller
         $yearStart = now()->startOfYear()->toDateString();
         $yearEnd = now()->endOfYear()->toDateString();
 
-        // Doanh thu & giá vốn năm nay (đơn đã xác nhận/giao/hoàn thành), gồm thuế như biểu đồ tháng
+        // Doanh thu thuần (chưa VAT) & giá vốn năm nay (đơn đã xác nhận/giao/hoàn thành)
         $yearAgg = DB::table('sales_order_items as soi')
             ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
             ->where('so.organization_id', $orgId)
             ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
             ->whereBetween('so.order_date', [$yearStart, $yearEnd])
             ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
-            ->selectRaw('COALESCE(SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))), 0) as revenue, COALESCE(SUM(soi.quantity * soi.cost_price), 0) as cost')
+            ->selectRaw('COALESCE(SUM(((soi.amount - soi.order_discount_alloc))), 0) as revenue, COALESCE(SUM(soi.quantity * soi.cost_price), 0) as cost')
             ->first();
 
         $yearRevenue = (float) ($yearAgg->revenue ?? 0);
@@ -146,16 +148,17 @@ class ReportController extends Controller
             ->when($purchaseCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
             ->sum('total_amount');
 
-        // Doanh thu 12 tháng gần nhất (đã lọc theo quyền xem) cho biểu đồ
+        // Doanh thu thuần (chưa VAT) 12 tháng gần nhất (đã lọc theo quyền xem) cho biểu đồ
         $monthlyFrom = now()->subMonths(11)->startOfMonth()->toDateString();
-        $monthly = DB::table('sales_orders')
-            ->where('organization_id', $orgId)
-            ->whereIn('status', ['confirmed', 'shipping', 'completed'])
-            ->where('order_date', '>=', $monthlyFrom)
-            ->when($salesCreators, fn ($q, $v) => $q->whereIn('created_by', $v))
-            ->groupByRaw("DATE_FORMAT(order_date, '%Y-%m')")
-            ->orderByRaw("DATE_FORMAT(order_date, '%Y-%m')")
-            ->selectRaw("DATE_FORMAT(order_date, '%Y-%m') as month, SUM(total_amount) as revenue")
+        $monthly = DB::table('sales_order_items as soi')
+            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
+            ->where('so.organization_id', $orgId)
+            ->whereIn('so.status', ['confirmed', 'shipping', 'completed'])
+            ->where('so.order_date', '>=', $monthlyFrom)
+            ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
+            ->groupByRaw("DATE_FORMAT(so.order_date, '%Y-%m')")
+            ->orderByRaw("DATE_FORMAT(so.order_date, '%Y-%m')")
+            ->selectRaw("DATE_FORMAT(so.order_date, '%Y-%m') as month, SUM(soi.amount - soi.order_discount_alloc) as revenue")
             ->get();
 
         // ── Sản phẩm bán chạy nhất trong 30 ngày gần nhất (theo số lượng) ──
@@ -357,6 +360,75 @@ class ReportController extends Controller
         };
     }
 
+    /**
+     * Báo cáo doanh thu / giá vốn / lợi nhuận theo TOUR (loại hình tour du lịch).
+     * Khớp với KQHĐKD: doanh thu thuần = total_amount − tax_amount (TK 511);
+     * giá vốn = Σ(unit_price × quantity × days) dịch vụ (TK 632, chưa VAT đầu vào).
+     */
+    public function tours(Request $request): JsonResponse
+    {
+        $orgId = $this->orgId();
+        $showProfit = $this->canViewProfit();
+
+        $costSub = DB::table('tour_services')
+            ->selectRaw('tour_id, COALESCE(SUM(unit_price * quantity * days), 0) as cost')
+            ->groupBy('tour_id');
+
+        $rows = DB::table('tours as t')
+            ->leftJoinSub($costSub, 'sc', 'sc.tour_id', '=', 't.id')
+            ->leftJoin('companies as c', 'c.id', '=', 't.customer_id')
+            ->where('t.organization_id', $orgId)
+            ->whereIn('t.status', ['confirmed', 'completed'])
+            ->when($request->from, fn ($q, $v) => $q->where('t.start_date', '>=', $v))
+            ->when($request->to, fn ($q, $v) => $q->where('t.start_date', '<=', $v))
+            ->orderByDesc('t.start_date')
+            ->select([
+                't.id',
+                't.tour_number',
+                't.name',
+                'c.name as customer_name',
+                't.start_date',
+                't.end_date',
+                't.num_guests',
+                't.status',
+                DB::raw('(t.total_amount - t.tax_amount) as revenue'),
+                DB::raw('COALESCE(sc.cost, 0) as cost'),
+            ])
+            ->get()
+            ->map(function ($r) use ($showProfit) {
+                $revenue = round((float) $r->revenue);
+                $cost = round((float) $r->cost);
+
+                $row = [
+                    'id' => $r->id,
+                    'tour_number' => $r->tour_number,
+                    'name' => $r->name,
+                    'customer_name' => $r->customer_name,
+                    'start_date' => $r->start_date,
+                    'end_date' => $r->end_date,
+                    'num_guests' => (int) $r->num_guests,
+                    'status' => $r->status,
+                    'revenue' => $revenue,
+                    'cost' => $cost,
+                    'profit' => $revenue - $cost,
+                    'margin' => $revenue > 0 ? round(($revenue - $cost) / $revenue * 100, 1) : 0,
+                ];
+
+                return $showProfit ? $row : $this->stripProfitFields($row);
+            });
+
+        return response()->json([
+            'data' => $rows->values(),
+            'total_revenue' => round($rows->sum('revenue')),
+            'tour_count' => $rows->count(),
+            'guest_count' => (int) $rows->sum('num_guests'),
+            ...($showProfit ? [
+                'total_cost' => round($rows->sum('cost')),
+                'gross_profit' => round($rows->sum('profit')),
+            ] : []),
+        ]);
+    }
+
     private function canViewProfit(): bool
     {
         /** @var User $user */
@@ -421,11 +493,11 @@ class ReportController extends Controller
                 'cat.name as cat_name',
                 'parent.name as parent_name',
                 DB::raw('SUM(soi.quantity) as quantity'),
-                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc)))'))
             ->get();
 
         $grouped = $rows->map(function ($r) use ($showProfit) {
@@ -485,7 +557,7 @@ class ReportController extends Controller
             ->select([
                 DB::raw('DATE(so.order_date) as date'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
@@ -542,11 +614,11 @@ class ReportController extends Controller
                 'so.company_id',
                 DB::raw("COALESCE(c.name, '(Khách lẻ)') as customer_name"),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc)))'))
             ->get()
             ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);
@@ -598,7 +670,7 @@ class ReportController extends Controller
             ->select([
                 DB::raw("DATE_FORMAT(so.order_date, '%Y-%m') as month"),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
@@ -656,11 +728,11 @@ class ReportController extends Controller
                 DB::raw("COALESCE(CASE WHEN parent_pc.name IS NOT NULL THEN CONCAT(parent_pc.name, ' › ', pc.name) ELSE pc.name END, '(Chưa phân loại)') as category_name"),
                 DB::raw('SUM(soi.quantity) as quantity'),
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc)))'))
             ->get()
             ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);
@@ -1437,11 +1509,11 @@ class ReportController extends Controller
                 'u.department',
                 'u.position',
                 DB::raw('COUNT(DISTINCT so.id) as order_count'),
-                DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100))) as revenue'),
+                DB::raw('SUM(((soi.amount - soi.order_discount_alloc))) as revenue'),
                 DB::raw('SUM(soi.quantity * soi.cost_price) as cost'),
                 DB::raw('SUM(CASE WHEN soi.standard_price > 0 THEN soi.quantity * soi.standard_price ELSE 0 END) as standard_total'),
             ])
-            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc) * (1 + soi.tax_rate / 100)))'))
+            ->orderByDesc(DB::raw('SUM(((soi.amount - soi.order_discount_alloc)))'))
             ->get()
             ->map(function ($r) use ($showProfit) {
                 $revenue = round((float) $r->revenue, 2);

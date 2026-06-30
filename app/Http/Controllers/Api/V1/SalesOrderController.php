@@ -99,6 +99,29 @@ class SalesOrderController extends Controller
         return SalesOrderResource::collection($orders);
     }
 
+    /**
+     * Mã các đơn ĐÃ HỦY trong 10 ngày gần nhất (số đơn / mã vận đơn / mã tham chiếu)
+     * — dùng cho máy quét để chặn quét nhầm đơn đã hủy.
+     */
+    public function cancelledCodes(): JsonResponse
+    {
+        $orders = SalesOrder::where('organization_id', $this->orgId())
+            ->where('status', OrderStatus::Cancelled)
+            ->where('updated_at', '>=', now()->subDays(10))
+            ->get(['order_number', 'tracking_number', 'ref_id']);
+
+        $codes = [];
+        foreach ($orders as $o) {
+            foreach ([$o->order_number, $o->tracking_number, $o->ref_id] as $c) {
+                if (! empty($c)) {
+                    $codes[] = (string) $c;
+                }
+            }
+        }
+
+        return response()->json(['codes' => array_values(array_unique($codes))]);
+    }
+
     public function counts(): JsonResponse
     {
         /** @var User $user */
@@ -338,6 +361,11 @@ class SalesOrderController extends Controller
                         'amount' => $amount,
                     ]);
 
+                    // Trả hàng / dòng SL âm = nhập lại kho → KHÔNG giữ chỗ tồn (tránh reserved âm)
+                    if ((float) $item['quantity'] <= 0) {
+                        continue;
+                    }
+
                     $recipe = $recipes->get($item['product_id']);
                     if ($recipe) {
                         // Đặt trước nguyên liệu theo công thức
@@ -364,6 +392,7 @@ class SalesOrderController extends Controller
                 };
 
                 $totalAmount = $subtotal + $taxAmount - $orderDiscountAmount;
+                $netRevenue = $subtotal - $orderDiscountAmount; // doanh thu thuần (chưa VAT)
                 $standardTotal = round($standardTotal);
                 $order->update([
                     'subtotal' => $subtotal,
@@ -371,8 +400,8 @@ class SalesOrderController extends Controller
                     'discount_amount' => $orderDiscountAmount,
                     'total_amount' => $totalAmount,
                     'standard_total' => $standardTotal,
-                    // Đơn trả hàng có standard_total âm → vẫn tính (đảo ngược lời/lỗ đơn gốc)
-                    'employee_profit' => abs($standardTotal) > 0.001 ? $totalAmount - $standardTotal : 0,
+                    // Lời/lỗ NV tính trên doanh thu thuần (chưa VAT). Đơn trả hàng standard_total âm vẫn tính.
+                    'employee_profit' => abs($standardTotal) > 0.001 ? $netRevenue - $standardTotal : 0,
                 ]);
 
                 return $order;
@@ -671,6 +700,9 @@ class SalesOrderController extends Controller
 
             // Release reservations for all existing items
             foreach ($salesOrder->items as $item) {
+                if ((float) $item->quantity <= 0) {
+                    continue; // dòng âm/trả hàng vốn không giữ chỗ → không cần hoàn
+                }
                 $recipe = $existingRecipes->get($item->product_id);
                 if ($recipe) {
                     $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
@@ -743,6 +775,10 @@ class SalesOrderController extends Controller
                     'is_served' => $item['is_served'] ?? false,
                 ]);
 
+                if ((float) $item['quantity'] <= 0) {
+                    continue; // dòng âm/trả hàng: nhập lại kho → không giữ chỗ
+                }
+
                 $recipe = $newRecipes->get($item['product_id']);
                 if ($recipe) {
                     $multiplier = (float) $item['quantity'] / (float) $recipe->yield_quantity;
@@ -768,6 +804,7 @@ class SalesOrderController extends Controller
             };
 
             $totalAmount = $subtotal + $taxAmount - $orderDiscountAmount;
+            $netRevenue = $subtotal - $orderDiscountAmount; // doanh thu thuần (chưa VAT)
             $standardTotal = round($standardTotal);
             $salesOrder->update([
                 'subtotal' => $subtotal,
@@ -775,8 +812,8 @@ class SalesOrderController extends Controller
                 'discount_amount' => $orderDiscountAmount,
                 'total_amount' => $totalAmount,
                 'standard_total' => $standardTotal,
-                // Đơn trả hàng có standard_total âm → vẫn tính (đảo ngược lời/lỗ đơn gốc)
-                'employee_profit' => abs($standardTotal) > 0.001 ? $totalAmount - $standardTotal : 0,
+                // Lời/lỗ NV tính trên doanh thu thuần (chưa VAT). Đơn trả hàng standard_total âm vẫn tính.
+                'employee_profit' => abs($standardTotal) > 0.001 ? $netRevenue - $standardTotal : 0,
             ]);
         });
 
@@ -1067,6 +1104,10 @@ class SalesOrderController extends Controller
                             'tax_rate' => $taxRate,
                             'amount' => $amount,
                         ]);
+
+                        if ((float) $item['quantity'] <= 0) {
+                            continue; // dòng âm/trả hàng: nhập lại kho → không giữ chỗ
+                        }
 
                         $recipe = $recipes->get($item['product_id']);
                         if ($recipe) {

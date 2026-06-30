@@ -114,8 +114,9 @@ class SalesOrderService
 
             // Load công thức TRƯỚC khi snapshot cost (cần để tính giá vốn từ nguyên liệu)
             $productIds = $order->items->pluck('product_id')->unique()->all();
-            $recipes = Recipe::with('ingredients')
+            $recipes = $this->manufacturingMode() ? collect() : Recipe::with('ingredients')
                 ->whereIn('product_id', $productIds)
+                ->whereIn('type', ['combo', 'recipe'])
                 ->get()
                 ->keyBy('product_id');
 
@@ -344,8 +345,9 @@ class SalesOrderService
             $inventoryByWarehouse = [];
 
             // SP combo/định mức: hoàn trả phải nhập lại THÀNH PHẦN, không phải SP tổng.
-            $returnRecipes = Recipe::with('ingredients')
+            $returnRecipes = $this->manufacturingMode() ? collect() : Recipe::with('ingredients')
                 ->whereIn('product_id', collect($data['items'])->pluck('product_id')->unique()->all())
+                ->whereIn('type', ['combo', 'recipe'])
                 ->get()
                 ->keyBy('product_id');
 
@@ -610,14 +612,24 @@ class SalesOrderService
         });
     }
 
+    /**
+     * Loại hình SẢN XUẤT bán thành phẩm từ tồn kho (không lắp ráp theo công thức khi bán).
+     * → bỏ qua công thức trong đơn bán; công thức (BOM) chỉ dùng cho lệnh sản xuất.
+     */
+    private function manufacturingMode(): bool
+    {
+        return Organization::find(app('orgId'))?->setting('business_mode') === 'manufacturing';
+    }
+
     private function assertSufficientStock(SalesOrder $order): void
     {
         $orgId = app('orgId');
         $errors = [];
 
         $productIds = $order->items->pluck('product_id')->unique()->all();
-        $recipes = Recipe::with('ingredients.ingredient:id,name')
+        $recipes = $this->manufacturingMode() ? collect() : Recipe::with('ingredients.ingredient:id,name')
             ->whereIn('product_id', $productIds)
+            ->whereIn('type', ['combo', 'recipe'])
             ->get()
             ->keyBy('product_id');
 
@@ -699,8 +711,9 @@ class SalesOrderService
         $orgId = app('orgId');
 
         $productIds = $order->items->pluck('product_id')->unique()->all();
-        $recipes = Recipe::with('ingredients')
+        $recipes = $this->manufacturingMode() ? collect() : Recipe::with('ingredients')
             ->whereIn('product_id', $productIds)
+            ->whereIn('type', ['combo', 'recipe'])
             ->get()
             ->keyBy('product_id');
 

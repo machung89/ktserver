@@ -206,7 +206,7 @@ class PromotionController extends Controller
         DB::transaction(function () use ($promotion, $chiaGia, $productIds, &$updatedCount) {
             $orders = SalesOrder::with('items')
                 ->where('organization_id', $this->orgId())
-                ->whereNotIn('status', ['cancelled'])
+                ->whereNotIn('status', ['cancelled', 'returned'])
                 ->when($promotion->start_date, fn ($q) => $q->where('order_date', '>=', $promotion->start_date))
                 ->when($promotion->end_date, fn ($q) => $q->where('order_date', '<=', $promotion->end_date))
                 ->get();

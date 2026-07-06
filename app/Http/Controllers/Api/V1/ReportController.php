@@ -46,7 +46,7 @@ class ReportController extends Controller
         $revenueMonth = (float) DB::table('sales_order_items as soi')
             ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
             ->where('so.organization_id', $orgId)
-            ->where('so.status', '!=', 'cancelled')
+            ->whereNotIn('so.status', ['cancelled', 'returned'])
             ->whereBetween('so.order_date', [$monthStart, $monthEnd])
             ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->sum(DB::raw('soi.amount - soi.order_discount_alloc'));
@@ -55,7 +55,7 @@ class ReportController extends Controller
         $revenueToday = (float) DB::table('sales_order_items as soi')
             ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
             ->where('so.organization_id', $orgId)
-            ->where('so.status', '!=', 'cancelled')
+            ->whereNotIn('so.status', ['cancelled', 'returned'])
             ->whereDate('so.order_date', now()->toDateString())
             ->when($salesCreators, fn ($q, $v) => $q->whereIn('so.created_by', $v))
             ->sum(DB::raw('soi.amount - soi.order_discount_alloc'));

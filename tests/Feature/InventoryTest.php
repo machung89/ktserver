@@ -7,8 +7,10 @@ use App\Enums\CompanyType;
 use App\Models\Account;
 use App\Models\Company;
 use App\Models\Inventory;
+use App\Models\InventoryTransaction;
 use App\Models\Product;
 use App\Models\Warehouse;
+use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
 
@@ -29,6 +31,7 @@ class InventoryTest extends TestCase
             ['code' => '331', 'name' => 'Phải trả nhà cung cấp', 'type' => AccountType::Liability],
             ['code' => '511', 'name' => 'Doanh thu bán hàng',    'type' => AccountType::Revenue],
             ['code' => '632', 'name' => 'Giá vốn hàng bán',     'type' => AccountType::Expense],
+            ['code' => '711', 'name' => 'Thu nhập khác',        'type' => AccountType::Revenue],
         ] as $acc) {
             Account::create(array_merge($acc, ['organization_id' => $this->organization->id, 'is_active' => true]));
         }
@@ -49,6 +52,68 @@ class InventoryTest extends TestCase
         return Inventory::where('product_id', $this->product->id)
             ->where('warehouse_id', $this->warehouse->id)
             ->first();
+    }
+
+    private function adjLedger(int $adjId, string $code): object
+    {
+        return DB::table('journal_entry_lines as l')
+            ->join('accounts as a', 'a.id', '=', 'l.account_id')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->where('j.reference_type', InventoryTransaction::class)
+            ->where('j.reference_id', $adjId)
+            ->where('a.code', $code)
+            ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')
+            ->first();
+    }
+
+    #[TestDox('Điều chỉnh tồn kho: ghi bút toán (giảm 632/156, tăng 156/711); xóa phiếu đảo tồn + bút toán')]
+    public function test_adjustment_posts_and_reverses_journal(): void
+    {
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 10, 'avg_cost' => 80000, 'stock_value' => 800000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+
+        // Giảm 2 (hao hụt), đơn giá tự lấy avg 80.000 → 160.000: Nợ 632 / Có 156
+        $adj = $this->postJson('/api/v1/inventory/adjustments', [
+            'warehouse_id' => $this->warehouse->id,
+            'transaction_date' => now()->toDateString(),
+            'items' => [['product_id' => $this->product->id, 'quantity_delta' => -2]],
+        ])->assertCreated()->json();
+        $adjId = $adj['id'];
+
+        $inv = $this->getInventory();
+        $this->assertEquals(8.0, (float) $inv->quantity);
+        $this->assertEquals(640000.0, (float) $inv->stock_value, 'stock_value = 8 × 80.000');
+
+        // Bút toán: Nợ 632 = 160.000, Có 156 = 160.000 (khớp thay đổi stock_value)
+        $this->assertEquals(160000.0, (float) $this->adjLedger($adjId, '632')->d);
+        $this->assertEquals(160000.0, (float) $this->adjLedger($adjId, '156')->c);
+        $sums = DB::table('journal_entry_lines as l')
+            ->join('journal_entries as j', 'j.id', '=', 'l.journal_entry_id')
+            ->where('j.reference_type', InventoryTransaction::class)->where('j.reference_id', $adjId)
+            ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
+        $this->assertEquals((float) $sums->d, (float) $sums->c, 'Bút toán điều chỉnh cân');
+
+        // Xóa phiếu → đảo tồn về 10 + xóa bút toán
+        $this->deleteJson("/api/v1/inventory/adjustments/{$adjId}")->assertOk();
+        $this->assertEquals(10.0, (float) $this->getInventory()->quantity);
+        $this->assertEquals(0, DB::table('journal_entries')
+            ->where('reference_type', InventoryTransaction::class)->where('reference_id', $adjId)->count());
+    }
+
+    #[TestDox('Điều chỉnh tăng tồn (thừa kiểm kê): Nợ 156 / Có 711')]
+    public function test_adjustment_increase_posts_income(): void
+    {
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 10, 'avg_cost' => 80000, 'stock_value' => 800000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+
+        // Thừa 5 @ 80.000 → 400.000: Nợ 156 / Có 711
+        $adj = $this->postJson('/api/v1/inventory/adjustments', [
+            'warehouse_id' => $this->warehouse->id,
+            'transaction_date' => now()->toDateString(),
+            'items' => [['product_id' => $this->product->id, 'quantity_delta' => 5, 'unit_price' => 80000]],
+        ])->assertCreated()->json();
+
+        $this->assertEquals(15.0, (float) $this->getInventory()->quantity);
+        $this->assertEquals(400000.0, (float) $this->adjLedger($adj['id'], '156')->d);
+        $this->assertEquals(400000.0, (float) $this->adjLedger($adj['id'], '711')->c);
     }
 
     private function seedStock(float $qty = 50, float $avgCost = 80000): void

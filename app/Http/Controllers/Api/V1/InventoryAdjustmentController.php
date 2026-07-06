@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Inventory;
 use App\Models\InventoryTransaction;
 use App\Services\InventoryTransactionService;
+use App\Services\JournalEntryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -16,7 +17,10 @@ class InventoryAdjustmentController extends Controller
 {
     use ScopedByOrganization;
 
-    public function __construct(private readonly InventoryTransactionService $inventoryService) {}
+    public function __construct(
+        private readonly InventoryTransactionService $inventoryService,
+        private readonly JournalEntryService $journalService,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -64,6 +68,9 @@ class InventoryAdjustmentController extends Controller
                 'organization_id' => $orgId,
             ]);
 
+            $increaseValue = 0.0; // giá trị tăng tồn (Nợ 156 / Có 711)
+            $decreaseValue = 0.0; // giá trị giảm tồn (Nợ 632 / Có 156)
+
             foreach ($validated['items'] as $item) {
                 $delta = (float) $item['quantity_delta'];
                 $unitPrice = isset($item['unit_price']) ? (float) $item['unit_price'] : 0.0;
@@ -83,7 +90,17 @@ class InventoryAdjustmentController extends Controller
                 ]);
 
                 $this->inventoryService->updateInventoryBalance($warehouseId, $item['product_id'], $delta, $unitPrice);
+
+                // Giá trị luân chuyển = Δ × đơn giá (khớp thay đổi stock_value → TK 156)
+                $value = round($delta * $unitPrice, 2);
+                if ($value > 0) {
+                    $increaseValue += $value;
+                } elseif ($value < 0) {
+                    $decreaseValue += -$value;
+                }
             }
+
+            $this->postJournal($tx, round($increaseValue, 2), round($decreaseValue, 2));
 
             return $tx->load(['warehouse', 'items.product']);
         });
@@ -114,10 +131,44 @@ class InventoryAdjustmentController extends Controller
                 );
             }
 
+            // Đảo bút toán điều chỉnh
+            $this->journalService->deleteByReference($adjustment);
+
             $adjustment->delete();
         });
 
         return response()->json(['message' => 'Đã hủy phiếu điều chỉnh.']);
+    }
+
+    /**
+     * Bút toán điều chỉnh tồn kho — giữ TK 156 khớp với giá trị tồn thực.
+     * Tăng (thừa): Nợ 156 / Có 711. Giảm (hao hụt): Nợ 632 / Có 156.
+     */
+    private function postJournal(InventoryTransaction $tx, float $increaseValue, float $decreaseValue): void
+    {
+        if ($increaseValue < 1 && $decreaseValue < 1) {
+            return; // không có giá trị luân chuyển (đơn giá 0) → bỏ qua
+        }
+
+        $desc = 'Điều chỉnh tồn kho'.($tx->description ? " - {$tx->description}" : '');
+        $lines = [];
+
+        if ($increaseValue >= 1) {
+            $lines[] = ['account_code' => '156', 'description' => "Tồn thừa kiểm kê - {$desc}", 'debit' => $increaseValue, 'credit' => 0];
+            $lines[] = ['account_code' => '711', 'description' => "Thu nhập hàng thừa - {$desc}", 'debit' => 0, 'credit' => $increaseValue];
+        }
+
+        if ($decreaseValue >= 1) {
+            $lines[] = ['account_code' => '632', 'description' => "Hao hụt/giảm tồn - {$desc}", 'debit' => $decreaseValue, 'credit' => 0];
+            $lines[] = ['account_code' => '156', 'description' => "Tồn thiếu kiểm kê - {$desc}", 'debit' => 0, 'credit' => $decreaseValue];
+        }
+
+        $this->journalService->create(
+            description: $desc,
+            entryDate: $tx->transaction_date->toDateString(),
+            reference: $tx,
+            lines: $lines,
+        );
     }
 
     /**

@@ -483,6 +483,73 @@ class SalesOrderTest extends TestCase
             ->assertJsonPath('summary.remaining_draft', 2);
     }
 
+    #[TestDox('Đánh dấu đã hoàn: chuyển đơn từ đã hủy → đã hoàn (kho không đổi)')]
+    public function test_mark_returned_from_cancelled(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+        app(SalesOrderService::class)->cancel(SalesOrder::find($order['id']));
+        $this->assertEquals('cancelled', SalesOrder::find($order['id'])->status->value);
+
+        $this->postJson("/api/v1/sales/{$order['id']}/mark-returned")->assertOk();
+        $this->assertEquals('returned', SalesOrder::find($order['id'])->status->value);
+
+        // Không cho đánh dấu khi không còn ở trạng thái đã hủy
+        $this->postJson("/api/v1/sales/{$order['id']}/mark-returned")->assertStatus(422);
+    }
+
+    #[TestDox('Quét mã hàng loạt: đơn đã hủy → đã hoàn; trạng thái khác bỏ qua; mã sai không tìm thấy')]
+    public function test_bulk_mark_returned_by_code(): void
+    {
+        $cancelled = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        DB::table('sales_orders')->where('id', $cancelled['id'])->update(['status' => 'cancelled', 'tracking_number' => 'VD-R1']);
+
+        $draft = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
+        DB::table('sales_orders')->where('id', $draft['id'])->update(['tracking_number' => 'VD-R2']);
+
+        $this->postJson('/api/v1/sales/bulk-mark-returned-by-code', ['codes' => ['VD-R1', 'VD-R2', 'KHONG-CO']])
+            ->assertOk()
+            ->assertJsonPath('summary.returned', 1)
+            ->assertJsonPath('summary.skipped', 1)
+            ->assertJsonPath('summary.not_found', 1);
+
+        $this->assertEquals('returned', SalesOrder::find($cancelled['id'])->status->value);
+        $this->assertEquals('draft', SalesOrder::find($draft['id'])->status->value);
+    }
+
+    #[TestDox('Đối soát theo mã tham chiếu: khớp/lệch/không tìm thấy + tổng hợp')]
+    public function test_reconcile_by_reference_amount(): void
+    {
+        $o1 = $this->postJson('/api/v1/sales', $this->validPayload())->json('data'); // total 200.000
+        DB::table('sales_orders')->where('id', $o1['id'])->update(['ref_id' => 'REF-A']);
+        $o2 = $this->postJson('/api/v1/sales', $this->validPayload())->json('data'); // total 200.000
+        DB::table('sales_orders')->where('id', $o2['id'])->update(['ref_id' => 'REF-B']);
+
+        $res = $this->postJson('/api/v1/sales/reconcile', [
+            'rows' => [
+                ['ref' => 'REF-A', 'amount' => 200000],  // khớp
+                ['ref' => 'REF-B', 'amount' => 180000],  // lệch -20.000
+                ['ref' => 'REF-X', 'amount' => 50000],   // không tìm thấy
+            ],
+        ])->assertOk()->json();
+
+        $byRef = collect($res['data'])->keyBy('ref');
+        $this->assertTrue($byRef['REF-A']['matched']);
+        $this->assertEquals(0, (float) $byRef['REF-A']['diff']);
+        $this->assertEquals(200000, (float) $byRef['REF-B']['system_amount']);
+        $this->assertEquals(-20000, (float) $byRef['REF-B']['diff']);
+        $this->assertFalse($byRef['REF-X']['matched']);
+        $this->assertNull($byRef['REF-X']['system_amount']);
+
+        $this->assertEquals(3, $res['summary']['count']);
+        $this->assertEquals(2, $res['summary']['matched']);
+        $this->assertEquals(1, $res['summary']['not_found']);
+        $this->assertEquals(1, $res['summary']['mismatch']);
+        $this->assertEquals(430000, (float) $res['summary']['total_excel']);
+        $this->assertEquals(400000, (float) $res['summary']['total_system']);
+        $this->assertEquals(30000, (float) $res['summary']['total_diff']);
+    }
+
     public function test_cancelled_codes_last_10_days(): void
     {
         $recent = $this->postJson('/api/v1/sales', $this->validPayload())->json('data');
@@ -687,6 +754,31 @@ class SalesOrderTest extends TestCase
             ->where('j.reference_type', Payment::class)->where('j.reference_id', $p['id'])
             ->where('a.code', '331')->where('l.credit_amount', 150000)->exists();
         $this->assertTrue($credit331, 'Phải có dòng Có 331 = 150.000');
+    }
+
+    #[TestDox('Thu khác / hoàn ứng NCC (đối ứng ≠131) KHÔNG tính vào quỹ ứng trước của khách')]
+    public function test_non_customer_advance_receipt_excluded_from_advance_pool(): void
+    {
+        $cash = Account::where('organization_id', $this->organization->id)->where('code', 'like', '111%')->firstOrFail();
+        $ap = Account::where('organization_id', $this->organization->id)->where('code', '331')->firstOrFail();
+        $svc = app(PaymentService::class);
+
+        // Thu hoàn ứng NCC (đối ứng 331) cho đúng company này, không gắn đơn
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt', 'company_id' => $this->customer->id, 'account_id' => $cash->id,
+            'expense_account_id' => $ap->id, 'payment_date' => now()->toDateString(), 'amount' => 150000,
+        ])->assertCreated();
+
+        // KHÔNG được tính vào quỹ ứng của khách (vì đối ứng 331, không phải 131)
+        $this->assertEquals(0.0, $svc->availableAdvance($this->customer->id, $this->organization->id));
+
+        // Phiếu thu trước THẬT (đối ứng 131 mặc định) thì được tính
+        $this->postJson('/api/v1/payments', [
+            'type' => 'receipt', 'company_id' => $this->customer->id, 'account_id' => $cash->id,
+            'payment_date' => now()->toDateString(), 'amount' => 200000, 'is_advance' => true,
+        ])->assertCreated();
+
+        $this->assertEquals(200000.0, $svc->availableAdvance($this->customer->id, $this->organization->id));
     }
 
     #[TestDox('Chi trả lại tiền khách ứng trước: Nợ 131 / Có 111 và giảm quỹ ứng')]

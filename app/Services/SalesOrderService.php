@@ -50,7 +50,7 @@ class SalesOrderService
 
         $hasActive = SalesOrder::where('restaurant_table_id', $order->restaurant_table_id)
             ->where('id', '!=', $order->id)
-            ->whereNotIn('status', [OrderStatus::Completed, OrderStatus::Cancelled])
+            ->whereNotIn('status', [OrderStatus::Completed, OrderStatus::Cancelled, OrderStatus::Returned])
             ->exists();
 
         if (! $hasActive) {
@@ -561,6 +561,11 @@ class SalesOrderService
 
     public function cancel(SalesOrder $order): SalesOrder
     {
+        // Guard NGOÀI transaction: không hủy đơn đã ở trạng thái cuối (đã hủy / đã hoàn)
+        if (in_array($order->status, [OrderStatus::Cancelled, OrderStatus::Returned], true)) {
+            throw ValidationException::withMessages(['status' => ['Đơn đã ở trạng thái cuối (đã hủy/đã hoàn), không thể hủy.']]);
+        }
+
         return DB::transaction(function () use ($order) {
             if ($order->status === OrderStatus::Draft) {
                 // Đơn nháp: giải phóng reserved, không cần rollback kho/bút toán

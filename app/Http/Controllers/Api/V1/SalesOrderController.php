@@ -106,7 +106,7 @@ class SalesOrderController extends Controller
     public function cancelledCodes(): JsonResponse
     {
         $orders = SalesOrder::where('organization_id', $this->orgId())
-            ->where('status', OrderStatus::Cancelled)
+            ->whereIn('status', [OrderStatus::Cancelled, OrderStatus::Returned])
             ->where('updated_at', '>=', now()->subDays(10))
             ->get(['order_number', 'tracking_number', 'ref_id']);
 
@@ -120,6 +120,75 @@ class SalesOrderController extends Controller
         }
 
         return response()->json(['codes' => array_values(array_unique($codes))]);
+    }
+
+    /**
+     * Đối soát: khớp mã tham chiếu (ref_id / số đơn / mã vận đơn) với tổng tiền đơn hàng trên hệ thống,
+     * so với số tiền trong file Excel người dùng tải lên.
+     */
+    public function reconcile(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'rows' => ['required', 'array', 'min:1'],
+            'rows.*.ref' => ['required', 'string'],
+            'rows.*.amount' => ['nullable', 'numeric'],
+        ]);
+
+        $refs = collect($validated['rows'])
+            ->map(fn ($r) => trim((string) $r['ref']))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $orders = SalesOrder::where('organization_id', $this->orgId())
+            ->where(function ($q) use ($refs) {
+                $q->whereIn('ref_id', $refs)
+                    ->orWhereIn('order_number', $refs)
+                    ->orWhereIn('tracking_number', $refs);
+            })
+            ->get(['order_number', 'ref_id', 'tracking_number', 'total_amount', 'status']);
+
+        // Tra cứu theo từng mã (ref_id / số đơn / mã vận đơn)
+        $byCode = [];
+        foreach ($orders as $o) {
+            foreach ([$o->ref_id, $o->order_number, $o->tracking_number] as $c) {
+                if (! empty($c) && ! isset($byCode[(string) $c])) {
+                    $byCode[(string) $c] = $o;
+                }
+            }
+        }
+
+        $rows = collect($validated['rows'])->map(function ($row) use ($byCode) {
+            $ref = trim((string) $row['ref']);
+            $excel = round((float) ($row['amount'] ?? 0));
+            $order = $byCode[$ref] ?? null;
+            $system = $order ? round((float) $order->total_amount) : null;
+
+            return [
+                'ref' => $ref,
+                'excel_amount' => $excel,
+                'system_amount' => $system,
+                'order_number' => $order?->order_number,
+                'status' => $order ? $order->status->value : null,
+                'diff' => $order ? $excel - $system : null,
+                'matched' => $order !== null,
+            ];
+        });
+
+        $matched = $rows->where('matched', true);
+
+        return response()->json([
+            'data' => $rows->values(),
+            'summary' => [
+                'total_excel' => round($rows->sum('excel_amount')),
+                'total_system' => round($matched->sum('system_amount')),
+                'total_diff' => round($rows->sum('excel_amount') - $matched->sum('system_amount')),
+                'count' => $rows->count(),
+                'matched' => $matched->count(),
+                'not_found' => $rows->where('matched', false)->count(),
+                'mismatch' => $matched->filter(fn ($r) => abs((float) $r['diff']) >= 1)->count(),
+            ],
+        ]);
     }
 
     public function counts(): JsonResponse
@@ -149,6 +218,7 @@ class SalesOrderController extends Controller
             'shipping' => $counts['shipping'] ?? 0,
             'completed' => $counts['completed'] ?? 0,
             'cancelled' => $counts['cancelled'] ?? 0,
+            'returned' => $counts['returned'] ?? 0,
             'debt' => (int) $debt,
             'returns' => (int) $returns,
         ]);
@@ -984,6 +1054,68 @@ class SalesOrderController extends Controller
                     'reason' => 'Lỗi hệ thống',
                 ];
             }
+        }
+
+        return response()->json(['summary' => $summary, 'results' => $results]);
+    }
+
+    /**
+     * Đánh dấu ĐÃ NHẬN hàng hoàn: chuyển đơn từ "đã hủy" → "đã hoàn".
+     * Chỉ đổi nhãn trạng thái — tồn kho/bút toán đã xử lý khi hủy, không đụng lại.
+     */
+    public function markReturned(SalesOrder $salesOrder): SalesOrderResource
+    {
+        if ($salesOrder->status !== OrderStatus::Cancelled) {
+            throw ValidationException::withMessages(['status' => ['Chỉ đơn ở trạng thái "đã hủy" mới đánh dấu đã hoàn được.']]);
+        }
+
+        $salesOrder->update(['status' => OrderStatus::Returned]);
+
+        return new SalesOrderResource($salesOrder->fresh(['company', 'createdBy', 'shipper']));
+    }
+
+    /**
+     * Quét mã hàng loạt: chuyển các đơn "đã hủy" khớp mã sang "đã hoàn".
+     */
+    public function bulkMarkReturnedByCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'codes' => ['required', 'array', 'min:1'],
+            'codes.*' => ['required', 'string'],
+        ]);
+
+        $codes = collect($validated['codes'])->map(fn ($c) => trim($c))->filter()->unique()->values();
+        $orgId = $this->orgId();
+
+        $results = [];
+        $summary = ['returned' => 0, 'skipped' => 0, 'not_found' => 0];
+
+        foreach ($codes as $code) {
+            $order = SalesOrder::where('organization_id', $orgId)
+                ->where(function ($q) use ($code) {
+                    $q->where('order_number', $code)
+                        ->orWhere('tracking_number', $code)
+                        ->orWhere('ref_id', $code);
+                })
+                ->first();
+
+            if (! $order) {
+                $summary['not_found']++;
+                $results[] = ['code' => $code, 'status' => 'not_found'];
+
+                continue;
+            }
+
+            if ($order->status !== OrderStatus::Cancelled) {
+                $summary['skipped']++;
+                $results[] = ['code' => $code, 'status' => 'skipped', 'order_number' => $order->order_number, 'current_status' => $order->status->value];
+
+                continue;
+            }
+
+            $order->update(['status' => OrderStatus::Returned]);
+            $summary['returned']++;
+            $results[] = ['code' => $code, 'status' => 'returned', 'order_number' => $order->order_number];
         }
 
         return response()->json(['summary' => $summary, 'results' => $results]);

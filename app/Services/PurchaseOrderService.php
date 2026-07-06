@@ -7,6 +7,7 @@ use App\Enums\TransactionType;
 use App\Models\Inventory;
 use App\Models\InventoryTransaction;
 use App\Models\JournalEntry;
+use App\Models\Organization;
 use App\Models\Payment;
 use App\Models\PurchaseOrder;
 use Illuminate\Support\Facades\DB;
@@ -21,6 +22,19 @@ class PurchaseOrderService
 
     public function confirm(PurchaseOrder $order): PurchaseOrder
     {
+        // Guard NGOÀI transaction (tránh lỗi savepoint khi ném ValidationException trong nested transaction)
+        $order->loadMissing('items.product');
+
+        if ($order->status !== OrderStatus::Draft) {
+            throw ValidationException::withMessages(['status' => ['Chỉ có thể xác nhận phiếu ở trạng thái nháp.']]);
+        }
+
+        // Chốt chặn tồn âm cho dòng nhập SL âm (trả hàng NCC) — dùng chung cài đặt "cho phép bán khi hết hàng".
+        $org = Organization::find(app('orgId'));
+        if (! $org->setting('allow_negative_stock', false)) {
+            $this->assertNoNegativeStock($order);
+        }
+
         return DB::transaction(function () use ($order) {
             $order = PurchaseOrder::lockForUpdate()->find($order->id);
 
@@ -88,6 +102,42 @@ class PurchaseOrderService
 
             return $order->fresh(['company', 'warehouse', 'items.product']);
         });
+    }
+
+    /**
+     * Chặn dòng nhập SL âm (trả hàng NCC) làm tồn xuống dưới 0 khi tổ chức không cho phép tồn âm.
+     * Gộp theo sản phẩm (mọi dòng cùng đổ về kho của phiếu); chỉ kiểm SP có tổng nhập ròng âm.
+     */
+    private function assertNoNegativeStock(PurchaseOrder $order): void
+    {
+        $orgId = app('orgId');
+
+        $net = [];
+        foreach ($order->items as $item) {
+            $net[$item->product_id] = ($net[$item->product_id] ?? 0) + (float) $item->quantity;
+        }
+
+        $errors = [];
+        foreach ($net as $productId => $delta) {
+            if ($delta >= 0) {
+                continue; // nhập ròng dương → không thể làm âm tồn
+            }
+
+            $physical = (float) (Inventory::where([
+                'organization_id' => $orgId,
+                'warehouse_id' => $order->warehouse_id,
+                'product_id' => $productId,
+            ])->value('quantity') ?? 0);
+
+            if ($physical + $delta < 0) {
+                $name = $order->items->firstWhere('product_id', $productId)?->product?->name ?? "SP #{$productId}";
+                $errors[] = "Sản phẩm \"{$name}\" không đủ tồn để trả (tồn {$physical}, trả ".abs($delta).').';
+            }
+        }
+
+        if (! empty($errors)) {
+            throw ValidationException::withMessages(['inventory' => $errors]);
+        }
     }
 
     /**

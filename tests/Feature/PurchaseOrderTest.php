@@ -101,6 +101,41 @@ class PurchaseOrderTest extends TestCase
         ]);
     }
 
+    #[TestDox('Nhập SL âm vượt tồn bị chặn khi không cho phép tồn âm (dùng chung allow_negative_stock)')]
+    public function test_negative_purchase_blocked_when_would_go_negative(): void
+    {
+        // Tồn 5; trả NCC 10 → sẽ âm → chặn (allow_negative_stock mặc định false)
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 5, 'avg_cost' => 50000, 'stock_value' => 250000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+
+        $order = $this->postJson('/api/v1/purchases', $this->validPayload([
+            'items' => [['product_id' => $this->product->id, 'quantity' => -10, 'unit_price' => 50000]],
+        ]))->assertCreated()->json('data');
+
+        $this->postJson("/api/v1/purchases/{$order['id']}/confirm")->assertStatus(422);
+
+        // Không đổi: vẫn nháp, tồn giữ nguyên 5
+        $this->assertEquals('draft', PurchaseOrder::find($order['id'])->status->value);
+        $this->assertEquals(5.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'));
+    }
+
+    #[TestDox('Bật allow_negative_stock: nhập SL âm vượt tồn vẫn xác nhận được (tồn xuống âm)')]
+    public function test_negative_purchase_allowed_when_setting_on(): void
+    {
+        $this->organization->update(['settings' => array_merge($this->organization->settings ?? [], ['allow_negative_stock' => true])]);
+        $this->seed(SystemAccountsSeeder::class);
+        app(DefaultAccountsService::class)->seedForOrganization($this->organization->id);
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 5, 'avg_cost' => 50000, 'stock_value' => 250000, 'reserved_quantity' => 0, 'min_quantity' => 0]);
+
+        $order = $this->postJson('/api/v1/purchases', $this->validPayload([
+            'items' => [['product_id' => $this->product->id, 'quantity' => -10, 'unit_price' => 50000]],
+        ]))->assertCreated()->json('data');
+
+        app()->instance('orgId', $this->organization->id);
+        app(PurchaseOrderService::class)->confirm(PurchaseOrder::find($order['id']));
+
+        $this->assertEquals(-5.0, (float) Inventory::where('product_id', $this->product->id)->value('quantity'));
+    }
+
     #[TestDox('Cho phép số lượng âm (trả hàng NCC): tạo được + xác nhận giảm tồn, bút toán cân')]
     public function test_allows_negative_quantity_and_confirm_balances(): void
     {
@@ -128,6 +163,24 @@ class PurchaseOrderTest extends TestCase
             ->where('j.reference_type', PurchaseOrder::class)->where('j.reference_id', $order['id'])
             ->selectRaw('COALESCE(SUM(l.debit_amount),0) as d, COALESCE(SUM(l.credit_amount),0) as c')->first();
         $this->assertEquals((float) $sums->d, (float) $sums->c, 'Bút toán đơn nhập âm vẫn cân');
+    }
+
+    #[TestDox('Đề xuất nhập 0 ngày: bù theo TỒN THỰC đang âm, không tính giữ chỗ (có thể bán)')]
+    public function test_suggest_zero_days_uses_physical_stock_not_available(): void
+    {
+        // prodX: tồn thực 0 nhưng giữ chỗ 5 → available -5. 0 ngày KHÔNG được đề xuất (tồn thực không âm).
+        $prodX = Product::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true]);
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $prodX->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => 0, 'reserved_quantity' => 5, 'avg_cost' => 1000, 'stock_value' => 0, 'min_quantity' => 0]);
+
+        // prodY: tồn thực -3 → bù 3 về 0
+        $prodY = Product::factory()->create(['organization_id' => $this->organization->id, 'is_active' => true]);
+        Inventory::factory()->create(['organization_id' => $this->organization->id, 'product_id' => $prodY->id, 'warehouse_id' => $this->warehouse->id, 'quantity' => -3, 'reserved_quantity' => 0, 'avg_cost' => 1000, 'stock_value' => -3000, 'min_quantity' => 0]);
+
+        $data = collect($this->getJson('/api/v1/purchases/suggest?days=0')->assertOk()->json('data'))->keyBy('product_id');
+
+        $this->assertArrayNotHasKey($prodX->id, $data->all(), '0 ngày: tồn thực 0 (dù có giữ chỗ) không được đề xuất');
+        $this->assertArrayHasKey($prodY->id, $data->all());
+        $this->assertEquals(3.0, (float) $data[$prodY->id]['suggest_qty']);
     }
 
     #[TestDox('Đề xuất nhập: loại combo/định mức, cộng tiêu hao nguyên liệu từ combo bán ra')]

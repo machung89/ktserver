@@ -104,8 +104,9 @@ class ShopeeImportController extends Controller
             // If order already exists by ref_id → confirm if transitioning from Draft, then update status
             $existingOrder = SalesOrder::where('ref_id', (string) $orderId)->first();
             if ($existingOrder) {
-                // Bỏ qua nếu trạng thái không thay đổi hoặc đã hủy rồi
-                if ($existingOrder->status === $mappedStatus || $existingOrder->status === OrderStatus::Cancelled) {
+                // Bỏ qua nếu trạng thái không thay đổi, hoặc đã hủy / đã hoàn (trạng thái cuối) rồi
+                if ($existingOrder->status === $mappedStatus
+                    || in_array($existingOrder->status, [OrderStatus::Cancelled, OrderStatus::Returned], true)) {
                     continue;
                 }
 
@@ -298,6 +299,7 @@ class ShopeeImportController extends Controller
             OrderStatus::Shipping => 2,
             OrderStatus::Completed => 3,
             OrderStatus::Cancelled => 4,
+            OrderStatus::Returned => 4,
         };
     }
 

@@ -208,6 +208,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
             Route::get('sales', [SalesOrderController::class, 'index']);
             Route::get('sales/counts', [SalesOrderController::class, 'counts']);
             Route::get('sales/cancelled-codes', [SalesOrderController::class, 'cancelledCodes']);
+            Route::post('sales/reconcile', [SalesOrderController::class, 'reconcile']);
             Route::get('sales/{salesOrder}', [SalesOrderController::class, 'show']);
         });
         Route::post('sales', [SalesOrderController::class, 'store'])->middleware('permission:sales.create', 'subscription');
@@ -220,11 +221,13 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('sales/bulk-confirm-by-code', [SalesOrderController::class, 'bulkConfirmByCode'])->middleware('permission:sales.confirm');
         Route::post('sales/bulk-invoice-status', [SalesOrderController::class, 'bulkInvoiceStatus'])->middleware('permission:sales.edit');
         Route::post('sales/bulk-shipper-by-code', [SalesOrderController::class, 'bulkAssignShipperByCode'])->middleware('permission:sales.edit');
+        Route::post('sales/bulk-mark-returned-by-code', [SalesOrderController::class, 'bulkMarkReturnedByCode'])->middleware('permission:sales.cancel');
         Route::post('sales/invoice-export', [SalesOrderController::class, 'invoiceExport'])->middleware('permission:sales.view');
         Route::post('sales/{salesOrder}/confirm', [SalesOrderController::class, 'confirm'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/ship', [SalesOrderController::class, 'ship'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/complete', [SalesOrderController::class, 'complete'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/cancel', [SalesOrderController::class, 'cancel'])->middleware('permission:sales.cancel');
+        Route::post('sales/{salesOrder}/mark-returned', [SalesOrderController::class, 'markReturned'])->middleware('permission:sales.cancel');
         Route::post('sales/{salesOrder}/revert-to-draft', [SalesOrderController::class, 'revertToDraft'])->middleware('permission:sales.confirm');
         Route::post('sales/{salesOrder}/return-items', [SalesOrderController::class, 'returnItems'])->middleware('permission:sales.confirm');
         Route::patch('sales/{salesOrder}/items/{salesOrderItem}', [SalesOrderController::class, 'updateItem'])->middleware('permission:sales.view');

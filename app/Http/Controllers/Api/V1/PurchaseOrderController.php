@@ -104,12 +104,12 @@ class PurchaseOrderController extends Controller
             ->where('organization_id', $orgId)
             ->when($warehouseId, fn ($q, $v) => $q->where('warehouse_id', $v))
             ->groupBy('product_id')
-            ->selectRaw('product_id, SUM(quantity - reserved_quantity) as available')
-            ->pluck('available', 'product_id');
+            ->selectRaw('product_id, SUM(quantity - reserved_quantity) as available, SUM(quantity) as physical')
+            ->get()->keyBy('product_id');
 
         // Ứng viên: SP có tiêu hao trong 30 ngày HOẶC đang âm kho (để bù về 0)
         $candidateIds = collect(array_keys($consumption))
-            ->merge($stockMap->filter(fn ($a) => (float) $a < 0)->keys())
+            ->merge($stockMap->filter(fn ($r) => (float) $r->available < 0)->keys())
             ->unique()
             ->values();
 
@@ -131,11 +131,13 @@ class PurchaseOrderController extends Controller
             }
 
             $velocity = (float) ($consumption[$pid] ?? 0) / $window;
-            $available = (float) ($stockMap[$pid] ?? 0);
+            $available = (float) ($stockMap[$pid]->available ?? 0);
+            $physical = (float) ($stockMap[$pid]->physical ?? 0);
 
-            // Mục tiêu = đủ bán N ngày, đồng thời không để tồn âm.
-            // days=0: chỉ bù phần đang âm về 0.
-            $suggestQty = max($velocity * $coverDays, 0.0) - $available;
+            // days > 0: mục tiêu đủ bán N ngày, trừ số CÓ THỂ BÁN (tồn − giữ chỗ).
+            // days = 0: chỉ bù phần TỒN THỰC đang âm về 0 — KHÔNG tính "có thể bán" (giữ chỗ).
+            $baseline = $coverDays > 0 ? $available : $physical;
+            $suggestQty = max($velocity * $coverDays, 0.0) - $baseline;
             if ($suggestQty < 0.001) {
                 continue;
             }

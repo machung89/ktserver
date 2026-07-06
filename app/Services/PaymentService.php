@@ -267,10 +267,16 @@ class PaymentService
 
     private function computeAvailableAdvance(int $companyId, int $orgId, bool $lock): float
     {
+        // Chỉ tính quỹ ứng của KHÁCH = phiếu thu có TK đối ứng 131 (mặc định khi không chọn TK khác).
+        // Loại "thu khác (711)", "thu hoàn ứng NCC (331)", "hoàn tạm ứng NV (141)"… khỏi quỹ ứng.
+        $customerAdvanceOnly = fn ($q) => $q->whereNull('expense_account_id')
+            ->orWhereHas('expenseAccount', fn ($e) => $e->where('code', 'like', '131%'));
+
         $poolQuery = Payment::where('company_id', $companyId)
             ->where('organization_id', $orgId)
             ->where('type', PaymentType::Receipt)
-            ->whereNull('reference_id');
+            ->whereNull('reference_id')
+            ->where($customerAdvanceOnly);
 
         if ($lock) {
             $poolQuery->lockForUpdate();
@@ -282,7 +288,8 @@ class PaymentService
         $allocated = (float) PaymentAllocation::where('organization_id', $orgId)
             ->whereHas('payment', fn ($q) => $q->where('company_id', $companyId)
                 ->where('type', PaymentType::Receipt)
-                ->whereNull('reference_id'))
+                ->whereNull('reference_id')
+                ->where($customerAdvanceOnly))
             ->sum('amount');
 
         // Tương thích ngược: phiếu is_advance kiểu cũ áp thẳng vào đơn (có reference_id)

@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class OrganizationController extends Controller
@@ -20,6 +21,23 @@ class OrganizationController extends Controller
         $org = Organization::with('bank')->findOrFail($this->orgId());
 
         return response()->json(['data' => $this->format($org)]);
+    }
+
+    /** Token cửa hàng công khai (link cho khách xem KM + nhận thông báo). Sinh nếu chưa có. */
+    public function storeToken(): JsonResponse
+    {
+        $org = Organization::findOrFail($this->orgId());
+        $token = $org->ensurePublicToken();
+
+        return response()->json(['token' => $token]);
+    }
+
+    public function regenerateStoreToken(): JsonResponse
+    {
+        $org = Organization::findOrFail($this->orgId());
+        $org->update(['public_token' => Str::random(40)]);
+
+        return response()->json(['token' => $org->public_token]);
     }
 
     public function update(Request $request): JsonResponse

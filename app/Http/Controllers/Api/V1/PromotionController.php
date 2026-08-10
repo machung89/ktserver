@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Api\V1\Concerns\ScopedByOrganization;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Api\V1\PromotionResource;
+use App\Jobs\SendPromotionPush;
 use App\Models\Promotion;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
@@ -42,6 +43,11 @@ class PromotionController extends Controller
         $promotion = Promotion::create(array_merge($data, ['organization_id' => $this->orgId()]));
 
         $this->syncRelations($promotion, $request);
+
+        // Push thông báo khuyến mãi mới cho khách đã đăng ký (Web Push). Mặc định bật; gửi 'notify=false' để tắt.
+        if ($promotion->is_active && $request->boolean('notify', true)) {
+            SendPromotionPush::dispatch($this->orgId(), 'Khuyến mãi mới', $promotion->name);
+        }
 
         return (new PromotionResource($promotion->load(['products', 'categories'])))
             ->response()->setStatusCode(201);

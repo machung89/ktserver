@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\V1\ProductController;
 use App\Http\Controllers\Api\V1\ProductionOrderController;
 use App\Http\Controllers\Api\V1\PromotionController;
 use App\Http\Controllers\Api\V1\ProvinceController;
+use App\Http\Controllers\Api\V1\PublicStoreController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
 use App\Http\Controllers\Api\V1\RecipeController;
 use App\Http\Controllers\Api\V1\ReportController;
@@ -43,6 +44,10 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::prefix('public')->group(function () {
     Route::get('table/{token}', [TableOrderController::class, 'info']);
     Route::post('table/{token}/order', [TableOrderController::class, 'placeOrder']);
+    // Cửa hàng công khai (không đăng nhập): KM đang có + đăng ký Web Push
+    Route::get('store/{token}/config', [PublicStoreController::class, 'config']);
+    Route::get('store/{token}/promotions', [PublicStoreController::class, 'promotions']);
+    Route::post('store/{token}/push-subscribe', [PublicStoreController::class, 'subscribe']);
 });
 
 Route::middleware('auth:sanctum')->group(function (): void {
@@ -303,6 +308,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::middleware('permission:settings.edit')->group(function () {
             Route::get('organization', [OrganizationController::class, 'show']);
             Route::put('organization', [OrganizationController::class, 'update']);
+            Route::get('organization/store-token', [OrganizationController::class, 'storeToken']);
+            Route::post('organization/store-token/regenerate', [OrganizationController::class, 'regenerateStoreToken']);
             Route::post('organization/logo', [OrganizationController::class, 'uploadLogo']);
             Route::delete('organization/logo', [OrganizationController::class, 'deleteLogo']);
             Route::post('organization/reset-data', [OrganizationController::class, 'resetData']);

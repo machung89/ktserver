@@ -98,6 +98,24 @@ class SalesOrderTest extends TestCase
         ]);
     }
 
+    #[TestDox('Reserved không bị âm khi giải phóng vượt (chặn "có thể bán" > tồn thực)')]
+    public function test_release_reservation_never_goes_negative(): void
+    {
+        $order = $this->postJson('/api/v1/sales', $this->validPayload())->assertCreated()->json('data');
+
+        $invQuery = Inventory::where(['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id]);
+        $this->assertEquals(2.0, (float) $invQuery->value('reserved_quantity'));
+
+        // Mô phỏng dữ liệu trôi: reserved còn 1 (thấp hơn số thực giữ chỗ)
+        $invQuery->update(['reserved_quantity' => 1]);
+
+        app(SalesOrderService::class)->confirm(SalesOrder::find($order['id']));
+
+        $inv = Inventory::where(['product_id' => $this->product->id, 'warehouse_id' => $this->warehouse->id])->first();
+        $this->assertEquals(0.0, (float) $inv->reserved_quantity, 'Reserved không được âm sau khi giải phóng vượt');
+        $this->assertEquals(98.0, (float) $inv->available_quantity, 'Có thể bán = tồn thực, không vượt');
+    }
+
     #[TestDox('Tạo đơn bán yêu cầu có sản phẩm')]
     public function test_create_requires_items(): void
     {

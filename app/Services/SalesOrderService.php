@@ -734,21 +734,27 @@ class SalesOrderService
                 $multiplier = (float) $item->quantity / (float) $recipe->yield_quantity;
                 foreach ($recipe->ingredients as $ingredient) {
                     $ingQty = round((float) $ingredient->quantity * $multiplier, 4);
-                    Inventory::ensureExists($ingredient->ingredient_id, $item->warehouse_id, $orgId);
-                    Inventory::where([
-                        'product_id' => $ingredient->ingredient_id,
-                        'warehouse_id' => $item->warehouse_id,
-                        'organization_id' => $orgId,
-                    ])->increment('reserved_quantity', $sign * $ingQty);
+                    $this->adjustReservedFloored($ingredient->ingredient_id, $item->warehouse_id, $orgId, $sign * $ingQty);
                 }
             } else {
-                Inventory::ensureExists($item->product_id, $item->warehouse_id, $orgId);
-                Inventory::where([
-                    'product_id' => $item->product_id,
-                    'warehouse_id' => $item->warehouse_id,
-                    'organization_id' => $orgId,
-                ])->increment('reserved_quantity', $sign * (float) $item->quantity);
+                $this->adjustReservedFloored($item->product_id, $item->warehouse_id, $orgId, $sign * (float) $item->quantity);
             }
         }
+    }
+
+    /**
+     * Cộng/trừ reserved_quantity nhưng KHÔNG cho xuống dưới 0 (đại lượng giữ chỗ luôn ≥ 0).
+     * Chặn tình trạng reserved âm làm "có thể bán" lớn hơn tồn thực tế.
+     */
+    private function adjustReservedFloored(int $productId, int $warehouseId, int $orgId, float $delta): void
+    {
+        Inventory::ensureExists($productId, $warehouseId, $orgId);
+        Inventory::where([
+            'product_id' => $productId,
+            'warehouse_id' => $warehouseId,
+            'organization_id' => $orgId,
+        ])->update([
+            'reserved_quantity' => DB::raw('GREATEST(0, reserved_quantity + ('.sprintf('%.4f', $delta).'))'),
+        ]);
     }
 }

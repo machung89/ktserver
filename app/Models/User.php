@@ -60,6 +60,12 @@ class User extends Authenticatable
 
     public function hasPermission(string $permission): bool
     {
+        // Super admin (quản trị hệ thống) có toàn quyền, kể cả khi đã switch sang org khác
+        // (roles bị scope theo org nên sẽ rỗng ở org không phải org gốc).
+        if ($this->is_super_admin) {
+            return true;
+        }
+
         if ($this->roles()->where('name', 'admin')->exists()) {
             return true;
         }

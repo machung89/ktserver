@@ -47,6 +47,9 @@ Route::prefix('public')->group(function () {
     // Cửa hàng công khai (không đăng nhập): KM đang có + đăng ký Web Push
     Route::get('store/{token}/config', [PublicStoreController::class, 'config']);
     Route::get('store/{token}/promotions', [PublicStoreController::class, 'promotions']);
+    Route::get('store/{token}/products', [PublicStoreController::class, 'products']);
+    Route::post('store/{token}/quote', [PublicStoreController::class, 'quote']);
+    Route::post('store/{token}/order', [PublicStoreController::class, 'placeOrder']);
     Route::post('store/{token}/push-subscribe', [PublicStoreController::class, 'subscribe']);
 });
 
@@ -69,7 +72,8 @@ Route::middleware('auth:sanctum')->group(function (): void {
         // Thông tin user + permissions
         Route::get('me', function (Request $request) {
             $user = $request->user()->load(['roles.permissions', 'organization']);
-            $isAdmin = $user->roles->contains('name', 'admin');
+            // Super admin: toàn quyền kể cả khi switch sang org khác (roles rỗng do bị scope theo org).
+            $isAdmin = (bool) $user->is_super_admin || $user->roles->contains('name', 'admin');
             $org = $user->organization;
 
             $permissions = $isAdmin

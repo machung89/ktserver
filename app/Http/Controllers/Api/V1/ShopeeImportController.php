@@ -224,10 +224,7 @@ class ShopeeImportController extends Controller
                     $subtotal = 0;
                     $standardTotal = 0;
                     foreach ($items as $item) {
-                        $base = (float) $item['quantity'] * (float) $item['unit_price'];
-                        $discountPct = (float) ($item['discount_pct'] ?? 0);
-                        $discountAmount = $base * $discountPct / 100;
-                        $amount = round($base - $discountAmount); // VND: làm tròn về đồng nguyên
+                        $amount = round((float) $item['quantity'] * (float) $item['unit_price']); // Không áp chiết khấu khi import
                         $subtotal += $amount;
                         $stdPrice = (float) ($item['standard_price'] ?? 0);
                         if ($stdPrice > 0) {
@@ -242,8 +239,8 @@ class ShopeeImportController extends Controller
                             'cost_price' => $item['cost_price'],
                             'standard_price' => $item['standard_price'] ?? 0,
                             'tax_rate' => 0,
-                            'discount_type' => $discountPct > 0 ? 'percent' : null,
-                            'discount_value' => $discountPct,
+                            'discount_type' => null,
+                            'discount_value' => 0,
                             'amount' => $amount,
                         ]);
 
